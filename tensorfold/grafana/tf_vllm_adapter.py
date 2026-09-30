@@ -43,7 +43,7 @@ class Hist:
 
 
 LOCK = threading.Lock()
-ST = {'off': 0, 'ino': None, 'finish': {}, 'last_kv_free': None,
+ST = {'off': 0, 'ino': None, 'finish': {}, 'last_kv_free': None, 'since': 0.0,
       'h': {'ttft': Hist(B_TTFT), 'tpot': Hist(B_TPOT), 'e2e': Hist(B_E2E), 'plen': Hist(B_LEN), 'glen': Hist(B_LEN),
             'queue': Hist(B_E2E), 'prefill': Hist(B_E2E), 'decode': Hist(B_E2E)}}
 
@@ -68,6 +68,8 @@ def ingest():
         try:
             r = json.loads(line)
         except Exception:
+            continue
+        if (r.get('ts') or 0) < ST['since']:      # finish reasons count the current server run only
             continue
         fin = r.get('finish') or ('error' if r.get('error') else 'stop')
         fin = {'tool_calls': 'stop', 'cancelled': 'abort'}.get(fin, fin)
@@ -105,6 +107,14 @@ def render():
     for m in re.finditer(r'^(tensorfold_[a-z_]+)\{model="([^"]*)"\} ([0-9.eE+-]+)$', t, re.M):
         v[m.group(1)] = float(m.group(3)); model = m.group(2)
     with LOCK:
+        up = v.get('tensorfold_uptime_seconds')
+        if up is not None:
+            since = time.time() - up
+            if abs(since - ST['since']) > 30:       # a new server run: finish counts start again
+                ST['since'] = since; ST['finish'] = {}
+                ST['off'] = 0; ST['ino'] = None
+                for k, hh in ST['h'].items():
+                    ST['h'][k] = Hist(hh.b)
         ingest()
         lab = f'engine="0",model_name="{model}"'
         o = []
@@ -126,7 +136,7 @@ def render():
         kv = 0.0 if kvf is None else max(0.0, min(1.0, (POOL_PAGES - kvf) / POOL_PAGES))
         g('vllm:kv_cache_usage_perc', 'gauge', kv)
         fin = dict(ST['finish'])
-        fin['error'] = max(fin.get('error', 0), v.get('tensorfold_request_errors_total', 0))
+        fin['error'] = v.get('tensorfold_request_errors_total', fin.get('error', 0))
         o.append('# TYPE vllm:request_success_total counter')
         for reason in ('stop', 'length', 'abort', 'error', 'repetition'):
             o.append(f'vllm:request_success_total{{{lab},finished_reason="{reason}"}} {fin.get(reason, 0)}')

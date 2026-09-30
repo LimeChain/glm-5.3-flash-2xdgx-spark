@@ -42,3 +42,7 @@ The patch adds one integer (`logprobs`) to the request header that rank 0 sends 
 GLM-5.3 lists `<|endoftext|>`, `<|user|>` and `<|observation|>` as end tokens, but on short exact-format replies it ends the turn with `<|assistant|>` and then writes a fake next turn into the answer (`...</score_A><|assistant|>We need answer exactly...`), logprobs included. `extra_stop()` (engine.py) adds `<|assistant|>` and generation_config's `eos_token_id` to the stop set by token id at load, on both ranks, before the engine and the batcher copy it. The decode loops already compare ids and cut a drafted window at the first stop token. `GLM53_TF_EXTRA_STOP` overrides the list (empty turns it off).
 
 Verified: `Output exactly: <score_A> B </score_A>` with top_logprobs 20 and reasoning high, 10 seeds (5 streamed, 5 not). Before the fix, 10/10 leaked a fake turn. After it, 10/10 return exactly the answer with `finish_reason: stop`, and the last logprob token is `>`. The OpenAI `stop` parameter is honored too.
+
+## 9003 — live token counters (`overlay/tensorfold/cuda/health.py`)
+
+`tensorfold_completion_tokens_total` counted a reply only when it finished, so a 65K-token reasoning reply showed up as one spike: 900–1500 tok/s "peaks" in Grafana that never happened. It now advances while the reply streams, and prompt tokens are counted when the request starts producing. The totals are unchanged. The Grafana adapter also counts finish reasons (errors/aborts) for the current server run only.

@@ -5,6 +5,7 @@ ARG BASE=glm53-tensorfold:dev
 FROM ${BASE}
 ARG PKG=/usr/local/lib/python3.12/dist-packages/tensorfold
 COPY tensorfold/cuda/server.py ${PKG}/cuda/server.py
+COPY tensorfold/cuda/health.py ${PKG}/cuda/health.py
 COPY tensorfold/families/glm5_next/cuda/batch.py ${PKG}/families/glm5_next/cuda/batch.py
 COPY tensorfold/families/glm5_next/cuda/decode.py ${PKG}/families/glm5_next/cuda/decode.py
 COPY tensorfold/families/glm5_next/cuda/engine.py ${PKG}/families/glm5_next/cuda/engine.py
