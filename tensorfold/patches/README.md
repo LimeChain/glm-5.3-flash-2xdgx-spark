@@ -1,6 +1,6 @@
 # TensorFold patches (LimeChain)
 
-## 9001 — OpenAI logprobs (`9001-glm-logprobs.patch`)
+## 9001 — OpenAI logprobs (`9001-glm-logprobs.patch` holds 9001, 9002 and 9003 together)
 
 The kit returns `logprobs: null`. This patch adds real log-probabilities so verifiers and best-of-N scorers can rank candidates.
 

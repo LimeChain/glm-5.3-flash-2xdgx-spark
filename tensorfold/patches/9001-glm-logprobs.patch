@@ -1,3 +1,31 @@
+diff --git a/src/tensorfold/cuda/health.py b/src/tensorfold/cuda/health.py
+index 2f2bb84..5f2f8a0 100644
+--- a/src/tensorfold/cuda/health.py
++++ b/src/tensorfold/cuda/health.py
+@@ -91,6 +91,11 @@ class Health:
+             if entry is not None:
+                 entry["last"] = self.clock()
+                 entry["tokens"] += n
++                # patches/9003: counters move while the reply streams (a long reply no longer lands at once)
++                self.counters["completion_tokens"] += n
++                if not entry.get("prompt_counted"):
++                    entry["prompt_counted"] = 1.0
++                    self.counters["prompt_tokens"] += entry["prompt"]
+ 
+     def end(self, rid: int, *, stats: dict[str, Any] | None = None, completion_tokens: int = 0,
+             error: BaseException | None = None) -> None:
+@@ -104,8 +109,9 @@ class Health:
+                 if not isinstance(error, ValueError) and self.fatal is None:
+                     self.fatal = f"{type(error).__name__}: {error}"[:500]
+                 return
+-            c["prompt_tokens"] += entry["prompt"] if entry else 0
+-            c["completion_tokens"] += completion_tokens
++            if entry is not None and not entry.get("prompt_counted"):
++                c["prompt_tokens"] += entry["prompt"]
++            c["completion_tokens"] += max(0.0, completion_tokens - (entry["tokens"] if entry else 0.0))   # 9003
+             stats = stats or {}
+             c["cached_tokens"] += float(stats.get("cached", 0) or 0)
+             c["decode_rounds"] += float(stats.get("rounds", 0) or 0)
 diff --git a/src/tensorfold/cuda/server.py b/src/tensorfold/cuda/server.py
 index c1c729b..6cd38ae 100644
 --- a/src/tensorfold/cuda/server.py
