@@ -28,7 +28,10 @@ set +a
 PORT="${PORT:-8000}"; NAME="${NAME:-glm53-tf}"
 export CONFIG
 log(){ echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
-healthy(){ [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "127.0.0.1:$PORT/health")" = 200 ]; }
+# /health can answer HTTP 200 with {"ok": false} after a rank dies (the batch loop stops); require ok:true
+healthy(){ curl -s --max-time 10 "127.0.0.1:$PORT/health" | grep -q '"ok": *true' || return 1
+  [ "$(docker inspect -f '{{.State.Running}}' "$NAME-r0" 2>/dev/null)" = true ] || return 1
+  [ "$(ssh -o BatchMode=yes "$WORKER_SSH" "docker inspect -f '{{.State.Running}}' $NAME-r1" 2>/dev/null)" = true ]; }
 slots(){ docker logs "$NAME-r0" 2>&1 | grep -oE 'batching [0-9]+ requests' | tail -1 | grep -oE '[0-9]+'; }
 evict(){
   # shellcheck disable=SC2086

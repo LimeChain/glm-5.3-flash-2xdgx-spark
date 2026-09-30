@@ -2280,11 +2280,16 @@ class Batcher:
         if lp_rows:
             from .decode import logprob_rows
 
-            got = logprob_rows(w, torch.cat([logits[off:off + R] for _, (off, R, _, _) in lp_rows]),
-                               [t for i, _ in lp_rows for t in sampled[i]])
+            try:                                # patches/9001: a failure fails those requests only (see _emit)
+                got = logprob_rows(w, torch.cat([logits[off:off + R] for _, (off, R, _, _) in lp_rows]),
+                                   [t for i, _ in lp_rows for t in sampled[i]])
+            except (ValueError, IndexError, TypeError, OverflowError) as exc:
+                print(f"[tensorfold] logprobs failed this round ({type(exc).__name__}: {exc}); the requests that "
+                      "asked get an error", file=sys.stderr, flush=True)
+                got = None
             at = 0
             for i, (_, R, _, _) in lp_rows:
-                lp_of[i] = got[at:at + R]
+                lp_of[i] = got[at:at + R] if got is not None else None
                 at += R
         shared = len(active) > 1
         tokens = 0

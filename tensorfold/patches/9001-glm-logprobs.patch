@@ -232,7 +232,7 @@ index c1c729b..6cd38ae 100644
  
      return Handler
 diff --git a/src/tensorfold/families/glm5_next/cuda/batch.py b/src/tensorfold/families/glm5_next/cuda/batch.py
-index dc15b34..45a0b06 100644
+index dc15b34..663feee 100644
 --- a/src/tensorfold/families/glm5_next/cuda/batch.py
 +++ b/src/tensorfold/families/glm5_next/cuda/batch.py
 @@ -722,6 +722,7 @@ class Job:
@@ -300,7 +300,7 @@ index dc15b34..45a0b06 100644
          if self.emit_first and self._held:          # patches/0540: not held behind the round's other pieces
              self._flush()
          seq.stepper = Stepper(self, slot, job, first, last_hidden)
-@@ -2263,11 +2274,23 @@ class Batcher:
+@@ -2263,11 +2274,28 @@ class Batcher:
              self._ahead = dover.rider_decode(words)
          else:
              sampled = sample_multi(w, logits, specs)
@@ -310,11 +310,16 @@ index dc15b34..45a0b06 100644
 +        if lp_rows:
 +            from .decode import logprob_rows
 +
-+            got = logprob_rows(w, torch.cat([logits[off:off + R] for _, (off, R, _, _) in lp_rows]),
-+                               [t for i, _ in lp_rows for t in sampled[i]])
++            try:                                # patches/9001: a failure fails those requests only (see _emit)
++                got = logprob_rows(w, torch.cat([logits[off:off + R] for _, (off, R, _, _) in lp_rows]),
++                                   [t for i, _ in lp_rows for t in sampled[i]])
++            except (ValueError, IndexError, TypeError, OverflowError) as exc:
++                print(f"[tensorfold] logprobs failed this round ({type(exc).__name__}: {exc}); the requests that "
++                      "asked get an error", file=sys.stderr, flush=True)
++                got = None
 +            at = 0
 +            for i, (_, R, _, _) in lp_rows:
-+                lp_of[i] = got[at:at + R]
++                lp_of[i] = got[at:at + R] if got is not None else None
 +                at += R
          shared = len(active) > 1
          tokens = 0
@@ -325,7 +330,7 @@ index dc15b34..45a0b06 100644
              pos = self.states[s].pos
              with self._on(s) as e:
                  keep = q.stepper.accept(e, rows, off, shared, n) if n != R else q.stepper.accept(e, rows, off, shared)
-@@ -2275,7 +2298,9 @@ class Batcher:
+@@ -2275,7 +2303,9 @@ class Batcher:
                  dumped.append((self.states[s], off, keep, win[:keep], pos))
              tokens += keep
              out = q.stepper.out
