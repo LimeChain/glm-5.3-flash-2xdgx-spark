@@ -10,4 +10,4 @@ COPY tensorfold/families/glm5_next/cuda/batch.py ${PKG}/families/glm5_next/cuda/
 COPY tensorfold/families/glm5_next/cuda/decode.py ${PKG}/families/glm5_next/cuda/decode.py
 COPY tensorfold/families/glm5_next/cuda/engine.py ${PKG}/families/glm5_next/cuda/engine.py
 COPY tensorfold/families/glm5_next/cuda/knobs.py ${PKG}/families/glm5_next/cuda/knobs.py
-RUN python -c "import tensorfold.cuda.server as s, tensorfold.families.glm5_next.cuda.batch, tensorfold.families.glm5_next.cuda.decode as d; assert d.logprob_rows and s.logprobs_request; print('patches/9001 ok')"
+RUN python -c "import tensorfold.cuda.server as s, tensorfold.families.glm5_next.cuda.batch, tensorfold.families.glm5_next.cuda.decode as d; assert d.logprob_rows and s.logprobs_request and s.response_stats; print('patches/9001-9004 ok')"

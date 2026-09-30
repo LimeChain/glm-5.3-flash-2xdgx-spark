@@ -167,6 +167,33 @@ def stop_holdback(text: str, stops: list[str]) -> int:
     return max((_partial_tag(text, s) for s in stops), default=0)
 
 
+# patches/9004: per-round series in the engine's stats grow with the reply (one entry a decode round). They are
+# benchmark data; a long reply's arrays exceed strict clients' JSON bounds and bloat every response.
+STATS_SERIES = frozenset({"keeps", "depths", "drafters", "arms", "stats"})
+STATS_MODES = ("summary", "full", "off")
+
+
+def stats_mode(body: dict[str, Any]) -> str:
+    """patches/9004: ``tensorfold_stats`` in the request, else GLM53_TF_STATS, else ``summary``."""
+
+    mode = body.get("tensorfold_stats")
+    if mode is None:
+        mode = (os.environ.get("GLM53_TF_STATS") or "summary").strip().lower()
+    return mode if mode in STATS_MODES else "summary"
+
+
+def response_stats(stats: dict[str, Any] | None, mode: str) -> dict[str, Any] | None:
+    """patches/9004: the ``tensorfold`` object for a response. ``summary`` drops the per-round series and keeps the
+    scalars (rounds, decode_s, tokens_per_round, ...) the canary and dashboards read; ``full`` is the engine's stats;
+    ``off`` omits the object."""
+
+    if mode == "off" or stats is None:
+        return None
+    if mode == "full":
+        return stats
+    return {key: value for key, value in stats.items() if key not in STATS_SERIES}
+
+
 def reasoning_fields(text: str) -> dict[str, str]:
     """patches/0160: the reply's reasoning under the field names GLM53_TF_REASONING_FIELDS asks for:
     ``both`` (default: ``reasoning_content`` and ``reasoning``), ``reasoning_content`` or ``reasoning``."""
@@ -480,6 +507,10 @@ class App:
             logprobs_request(body, "messages" in body)
         except ValueError as exc:
             return Problem(str(exc), param="logprobs")
+        mode = body.get("tensorfold_stats")         # patches/9004
+        if mode is not None and mode not in STATS_MODES:
+            return Problem(f"tensorfold_stats must be one of {', '.join(STATS_MODES)} (got {mode!r})",
+                           param="tensorfold_stats")
         n = body.get("n")
         if n is not None and n != 1:
             return f"n must be 1 on this server (got {n!r}): it returns one choice a request"
@@ -811,7 +842,9 @@ def make_handler(app: App):
                          "prompt_tokens_details": _cached(result)}          # patches/0110
                 if (body.get("stream_options") or {}).get("include_usage"):
                     end["usage"] = usage
-                end["tensorfold"] = result["stats"]      # patches/0090: the engine's stats (effective tf_knobs)
+                stats = response_stats(result["stats"], stats_mode(body))      # patches/0090, 9004
+                if stats is not None:
+                    end["tensorfold"] = stats
                 try:
                     self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
                     self.wfile.flush()
@@ -839,13 +872,16 @@ def make_handler(app: App):
                 if result.get("logprobs") is not None:      # patches/9001
                     choice["logprobs"] = {"content": result["logprobs"]}
                 payload = {"id": rid, "object": "chat.completion", "created": created, "model": app.served,
-                           "choices": [choice], "usage": usage, "tensorfold": result["stats"]}
+                           "choices": [choice], "usage": usage}
             else:
                 choice = {"index": 0, "text": result["content"], "finish_reason": result["finish"]}
                 if result.get("logprobs") is not None:      # patches/9001
                     choice["logprobs"] = legacy_logprobs(result["logprobs"])
                 payload = {"id": rid, "object": "text_completion", "created": created, "model": app.served,
-                           "choices": [choice], "usage": usage, "tensorfold": result["stats"]}
+                           "choices": [choice], "usage": usage}
+            stats = response_stats(result["stats"], stats_mode(body))      # patches/0090, 9004
+            if stats is not None:
+                payload["tensorfold"] = stats
             self._json(200, payload)
 
     return Handler

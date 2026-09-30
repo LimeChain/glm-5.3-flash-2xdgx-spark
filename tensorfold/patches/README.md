@@ -46,3 +46,16 @@ Verified: `Output exactly: <score_A> B </score_A>` with top_logprobs 20 and reas
 ## 9003 — live token counters (`overlay/tensorfold/cuda/health.py`)
 
 `tensorfold_completion_tokens_total` counted a reply only when it finished, so a 65K-token reasoning reply showed up as one spike: 900–1500 tok/s "peaks" in Grafana that never happened. It now advances while the reply streams, and prompt tokens are counted when the request starts producing. The totals are unchanged. The Grafana adapter also counts finish reasons (errors/aborts) for the current server run only.
+
+## 9004 — `tensorfold` stats summary (`9004-glm-stats-summary.patch`, overlay `cuda/server.py`)
+
+Every response carried the engine's full stats, including per-round series (`keeps`, `depths`, `drafters`) with one entry per decode round. A long reply's arrays run to thousands of items and megabytes: a 1,949-token logprobs reply was 3.6 MB, and strict clients reject it (Lime Agent's verifier caps any JSON value at 4,096 items and failed with `response_limit`).
+
+**Behavior**
+- Default `summary`: the `tensorfold` object keeps every scalar and small field (`rounds`, `decode_s`, `tokens_per_round`, `prefill_s`, `cached`, `round_kinds`, `tf_knobs`, ...) and drops the per-round series. `scripts/canary.py` and the Grafana adapter read only those scalars.
+- Per request: `"tensorfold_stats": "summary" | "full" | "off"`. `full` is the previous behavior, for the kit's `bench/` tools that read the series. Any other value is HTTP 400 with `param: "tensorfold_stats"`.
+- Server default: `GLM53_TF_STATS=summary|full|off` (invalid values fall back to `summary`).
+- Streaming: the same object on the final chunk.
+- Unchanged: generation, logprobs, usage. Host-only change; rank 1 needs no update, but rebuild both nodes to keep the images identical.
+
+Tests: `tests/test_tensorfold_stats.py`.
