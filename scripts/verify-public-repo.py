@@ -25,6 +25,10 @@ REQUIRED = {
     "scripts/verify-runtime-contract.py",
     "bench/benchmark.py",
     "results/production-tp2-mtp3-262k.json",
+    "docs/vllm-path.md",
+    "tensorfold/config/prod-c8.env.example",
+    "tensorfold/scripts/tf-prod.sh",
+    "tensorfold/grafana/tf_vllm_adapter.py",
 }
 missing = sorted(path for path in REQUIRED if not (ROOT / path).is_file())
 assert not missing, f"missing required files: {missing}"
@@ -82,7 +86,8 @@ for scenario, expected in expected_throughput.items():
 assert receipt["validation"]["qualified_long_context_prompt_tokens"] == 140012
 assert receipt["validation"]["c12_throughput_claimed"] is False
 
-readme = (ROOT / "README.md").read_text()
+# The original vLLM recipe (and its historical receipt claims) moved to docs/vllm-path.md on 2026-09-30.
+readme = (ROOT / "docs/vllm-path.md").read_text()
 for expected in (
     "29.74 tok/s",
     "68.07 tok/s",
@@ -95,6 +100,26 @@ for expected in (
     "enabled by default at High",
 ):
     assert expected in readme, f"README claim missing: {expected}"
+
+top = (ROOT / "README.md").read_text()
+for expected in (
+    "Path A — TensorFold",
+    "Path B — vLLM + NVFP4",
+    "GLM53_TF_BATCH_ADMIT_GB",
+    "docs/vllm-path.md",
+    "each ran **once**",
+):
+    assert expected in top, f"top-level README claim missing: {expected}"
+
+profile = (ROOT / "tensorfold/config/prod-c8.env.example").read_text()
+for expected in (
+    "GLM53_TF_BATCH=8",
+    "GLM53_TF_BATCH_ADMIT_GB=0.25",
+    "GLM53_TF_MULTI_PREFILL=1",
+    'WORKER_SSH="<worker-ssh>"',
+    'HEAD_IP="<head-ip>"',
+):
+    assert expected in profile, f"TensorFold profile contract missing: {expected}"
 
 # Reject environment-specific production identifiers without spelling them into
 # this repository's own source as one contiguous scanner false positive.

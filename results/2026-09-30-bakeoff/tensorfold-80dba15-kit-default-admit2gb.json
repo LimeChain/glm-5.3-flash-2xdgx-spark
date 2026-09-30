@@ -1,0 +1,160 @@
+{
+ "arm": "armD-tensorfold-8slot",
+ "api": {
+  "alias": true,
+  "max_len": [
+   null
+  ],
+  "think_default_ok": true
+ },
+ "known_answer": "12/12",
+ "count200": "3/3",
+ "korean": {
+  "verbatim": "6/6",
+  "fffd": 0,
+  "mid_word": 0,
+  "weird_scripts": 0
+ },
+ "toolcall": {
+  "tf_harness": "temperature=0.0 2 reps: 40/42 clean (95.2%), corruption=0/42 (0.0%)",
+  "corruption42k": null
+ },
+ "c1": {
+  "prose_off": {
+   "tok_s": 45.31,
+   "ttft": 0.364,
+   "toks": 1024,
+   "acc": null
+  },
+  "prose_high": {
+   "tok_s": 46.11,
+   "ttft": 0.283,
+   "toks": 1039,
+   "acc": null
+  },
+  "code_off": {
+   "tok_s": 61.24,
+   "ttft": 0.263,
+   "toks": 1024,
+   "acc": null
+  },
+  "code_high": {
+   "tok_s": 65.47,
+   "ttft": 0.278,
+   "toks": 2048,
+   "acc": null
+  }
+ },
+ "repo": {
+  "c1": {
+   "per_stream": 95.81,
+   "agg_decode": 95.76,
+   "agg_e2e": 91.73
+  },
+  "c8": {
+   "per_stream": 93.85,
+   "agg_decode": 750.48,
+   "agg_e2e": 88.73
+  }
+ },
+ "c8think": {
+  "aggregate_e2e_tok_s": 51.64,
+  "decode_median_tok_s": 53.58,
+  "ttft_max_s": 171.055,
+  "peak_waiting": null,
+  "errors": 0,
+  "spec_acceptance_pct": null,
+  "completion_tokens_total": 10310
+ },
+ "c8x19k": {
+  "cold": {
+   "aggregate_e2e_tok_s": 12.48,
+   "decode_median_tok_s": 45.75,
+   "decode_min_tok_s": 41.21,
+   "ttft_min_s": 15.56,
+   "ttft_median_s": 95.964,
+   "ttft_max_s": 158.603,
+   "peak_running": null,
+   "peak_waiting": null,
+   "peak_kv_pct": null,
+   "metric_cache_hit_pct": null,
+   "usage_cached_pct": 0.0,
+   "new_preemptions": null,
+   "errors": 0,
+   "all_overlap_s": 0.0,
+   "wall_s": 164.06,
+   "min_head_gib": 14.12,
+   "min_worker_gib": 14.56,
+   "prompt0": 23718
+  },
+  "follow": {
+   "aggregate_e2e_tok_s": 34.97,
+   "decode_median_tok_s": 57.43,
+   "decode_min_tok_s": 44.69,
+   "ttft_min_s": 0.707,
+   "ttft_median_s": 7.841,
+   "ttft_max_s": 13.362,
+   "peak_running": null,
+   "peak_waiting": null,
+   "peak_kv_pct": null,
+   "metric_cache_hit_pct": null,
+   "usage_cached_pct": 98.7,
+   "new_preemptions": null,
+   "errors": 0,
+   "all_overlap_s": 0.0,
+   "wall_s": 14.41,
+   "min_head_gib": 13.7,
+   "min_worker_gib": 14.37,
+   "prompt0": 23990
+  }
+ },
+ "depth": {
+  "max_ok_prompt_tokens": null,
+  "levels": [
+   {
+    "target": 24000,
+    "ok_8way": false,
+    "aggregate_e2e_tok_s": 10.4,
+    "decode_median_tok_s": 48.92,
+    "decode_min_tok_s": 40.48,
+    "ttft_min_s": 18.291,
+    "ttft_median_s": 116.384,
+    "ttft_max_s": 185.922,
+    "peak_running": null,
+    "peak_waiting": null,
+    "peak_kv_pct": null,
+    "metric_cache_hit_pct": null,
+    "usage_cached_pct": 0.0,
+    "new_preemptions": null,
+    "errors": 0,
+    "all_overlap_s": 0.0,
+    "wall_s": 190.59,
+    "min_head_gib": 12.95,
+    "min_worker_gib": 13.45,
+    "prompt0": 28243
+   }
+  ]
+ },
+ "prefill128k": {
+  "prompt": 141371,
+  "ttft": 93.205,
+  "prefill_tok_s": 1516.8,
+  "decode": 54.21,
+  "err": null,
+  "min_head_gib": 13.11,
+  "min_worker_gib": 13.77
+ },
+ "ping120k": {
+  "big_ttft": 93.097,
+  "ping_ttft": 85.947,
+  "big_prompt": 140832,
+  "errs": [
+   null,
+   null
+  ]
+ },
+ "memfloor": {
+  "min_head_gib": 12.95,
+  "min_worker_gib": 13.44
+ }
+}

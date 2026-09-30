@@ -1,0 +1,99 @@
+{
+ "arm": "tfopt-q2-5624dfc-nomulti",
+ "known_answer": null,
+ "count200": null,
+ "repo": {
+  "c1": {
+   "per_stream": 98.79,
+   "agg_decode": 98.78,
+   "agg_e2e": 94.5
+  },
+  "c8": {
+   "per_stream": 29.71,
+   "agg_decode": 228.12,
+   "agg_e2e": 210.64
+  }
+ },
+ "c8x19k": {
+  "cold": {
+   "aggregate_e2e_tok_s": 12.74,
+   "decode_median_tok_s": 9.63,
+   "decode_min_tok_s": 7.38,
+   "ttft_min_s": 14.952,
+   "ttft_median_s": 90.016,
+   "ttft_max_s": 146.311,
+   "peak_running": null,
+   "peak_waiting": null,
+   "peak_kv_pct": null,
+   "metric_cache_hit_pct": null,
+   "usage_cached_pct": 0.0,
+   "new_preemptions": null,
+   "errors": 0,
+   "all_overlap_s": 0.0,
+   "wall_s": 152.57,
+   "min_head_gib": 14.83,
+   "min_worker_gib": 15.08,
+   "prompt0": 22370
+  },
+  "follow": {
+   "aggregate_e2e_tok_s": 43.27,
+   "decode_median_tok_s": 8.98,
+   "decode_min_tok_s": 5.24,
+   "ttft_min_s": 0.549,
+   "ttft_median_s": 2.978,
+   "ttft_max_s": 4.92,
+   "peak_running": null,
+   "peak_waiting": null,
+   "peak_kv_pct": null,
+   "metric_cache_hit_pct": null,
+   "usage_cached_pct": 98.7,
+   "new_preemptions": null,
+   "errors": 0,
+   "all_overlap_s": 1.57,
+   "wall_s": 8.74,
+   "min_head_gib": 14.96,
+   "min_worker_gib": 15.08,
+   "prompt0": 22642
+  }
+ },
+ "depth": {
+  "max_ok_prompt_tokens": null,
+  "levels": [
+   {
+    "target": 48000,
+    "ok_8way": false,
+    "aggregate_e2e_tok_s": 5.87,
+    "decode_median_tok_s": 45.83,
+    "decode_min_tok_s": 27.47,
+    "ttft_min_s": 38.259,
+    "ttft_median_s": 204.229,
+    "ttft_max_s": 333.717,
+    "peak_running": null,
+    "peak_waiting": null,
+    "peak_kv_pct": null,
+    "metric_cache_hit_pct": null,
+    "usage_cached_pct": 0.0,
+    "new_preemptions": null,
+    "errors": 0,
+    "all_overlap_s": 0.0,
+    "wall_s": 339.07,
+    "min_head_gib": 13.05,
+    "min_worker_gib": 13.45,
+    "prompt0": 56439
+   }
+  ]
+ },
+ "ping120k": {
+  "big_ttft": 94.236,
+  "ping_ttft": 2.356,
+  "big_prompt": 144985,
+  "errs": [
+   null,
+   null
+  ]
+ },
+ "memfloor": {
+  "min_head_gib": 13.05,
+  "min_worker_gib": 13.45
+ }
+}

@@ -1,204 +1,145 @@
-# GLM-5.3 Flash NVFP4 on 2× NVIDIA DGX Spark
+# GLM-5.3 Flash on 2× NVIDIA DGX Spark
 
-Run the full **GLM-5.3 Flash NVFP4** checkpoint across two NVIDIA DGX Spark systems with vLLM tensor parallelism, FlashInfer sparse MLA, FP8 KV cache, and MTP3 speculative decoding.
+Two tested ways to serve **GLM-5.3 Flash** across two DGX Spark (GB10) systems linked over their ConnectX-7 ports, each behind an OpenAI-compatible API:
 
-**Measured production result:** **29.74 tok/s at C1** and **101.74 aggregate tok/s at C8**, with a configured 262,144-token context window.
+| Path | Engine | Weights | Use it when |
+|---|---|---|---|
+| **A — TensorFold (recommended)** | [`jayleaton/glm53-tensorfold-spark`](https://github.com/jayleaton/glm53-tensorfold-spark) @ `5624dfc` + the LimeChain C8 profile in [`tensorfold/`](tensorfold/) | EXL3 4-bit TR3 + DFlash2 drafter | you want the fastest C1 and C8, a 1M context, and near-free follow-up turns |
+| **B — vLLM + NVFP4** | this repository's original vLLM TP2 recipe ([`docs/vllm-path.md`](docs/vllm-path.md)) | NVFP4 | you need the full vLLM API surface (logprobs, `n>1`, vLLM metrics and tooling) |
 
-A separate [64K throughput tuning campaign](docs/tuning-2026-09-21.md) tests both
-RoCE links, CUDA graphs, larger cache capacity, and mixed workloads. Its results
-use a different methodology and do not replace the historical receipt below.
+Both paths were measured with the same harness, prompts, hardware and day in the [2026-09-30 bake-off](#bake-off-2026-09-30) below.
 
-The subsequent [MTP0/1/2/3 comparison](docs/mtp-results-2026-09-22.md) measures
-complete coding/tool answers and High-reasoning throughput at C1/C8/C16,
-including failed task cases and the single-request/shared-throughput tradeoff.
+> The repository was renamed from `glm-5.3-flash-2xdgx-spark-vllm` on 2026-09-30. Old URLs redirect.
 
-## Performance
+---
 
-Two matched cold starts. Each scenario used one warm-up wave followed by three measured waves with 512 completion tokens per request. The primary number is the arithmetic mean of the two cold-run medians.
+## Bake-off 2026-09-30
 
-| Concurrency | Aggregate decode throughput | Best cold-run median | Mean TTFT |
-|---:|---:|---:|---:|
-| C1 | **29.74 tok/s** | 30.11 tok/s | 0.287 s |
-| C4 | **68.07 tok/s** | 68.82 tok/s | 0.740 s |
-| C6 | **87.39 tok/s** | 87.43 tok/s | 0.776 s |
-| C8 | **101.74 tok/s** | 102.34 tok/s | 0.826 s |
+One pair of DGX Sparks, one arm at a time with nothing else on the GPUs. The matched suite is [`bench/bakeoff_suite.py`](bench/bakeoff_suite.py); raw summaries are in [`results/2026-09-30-bakeoff/`](results/2026-09-30-bakeoff/). All arms ran at temperature 0 with the thinking modes stated, and each ran **once**, so treat differences under ~5% as noise.
 
-C4/C6/C8 are **aggregate throughput**, not per-request speed. Full machine-readable methodology and values are in [`results/production-tp2-mtp3-262k.json`](results/production-tp2-mtp3-262k.json).
+### C8 and single-stream speed (tok/s)
 
-### Validated production profile
+| Test | **A: TensorFold (this profile)** | vLLM Mia EXL3 kit | vLLM NVFP4 (LibertAIDAI, prior production) |
+|---|---:|---:|---:|
+| C1 decode, short prompt | **99** | 72 | 37 |
+| C1 prose / code, thinking off ¹ | **45 / 61** | 21 / 33 | 23 / 29 |
+| **C8 short prompts, aggregate (per stream)** | **368 (46)** | 251 (34) | 185 (24) |
+| C8 reasoning, thinking High, aggregate | **93** | 74 | 76 |
+| C8 × ~23K follow-up turn, aggregate | **46** | 31 | 38 |
+| C8 × ~23K follow-up: prefix-cache hit | **98.7%** | 83.2% | 76.5% |
+| C8 × ~23K follow-up: slowest first token | **5 s** | 52 s | 30 s |
+| C8 × ~23K **cold** (fresh) prompts, aggregate | 10.8 | 10.2 | **13.8** |
+| C8 × ~23K cold: slowest first token | 183 s | 187 s | **127 s** |
+| Short request's first token during a 145K prefill | **1.5 s** | 6.5 s | 8.8 s |
+| 128K+ single prefill, tok/s | 1,517 | 1,447 | 1,518 |
+| Lowest MemAvailable, head / worker (GiB) | **12.9 / 13.2** | 5.5 / 7.4 | 4.5 / 6.5 |
+| Context per request | **1,048,576** | 262,144 | 262,144 |
 
-| Component | Configuration |
-|---|---|
-| Hardware | 2× NVIDIA DGX Spark / GB10, RoCE interconnect |
-| Checkpoint | [`LibertAIDAI/GLM-5.3-Flash-NVFP4`](https://huggingface.co/LibertAIDAI/GLM-5.3-Flash-NVFP4) at `9e0d74e3cef17f634e84fb8e2223707e02616290` |
-| Tensor parallelism | TP2, 32 local query heads per rank |
-| vLLM | `0.1.dev20051+g487ecf187` |
-| FlashInfer | `0.6.17`, rebuilt for `sm_121a` |
-| Attention | `FLASHINFER_MLA_SPARSE_SM120` |
-| MoE | Marlin NVFP4 |
-| KV cache | `fp8_ds_mla`, block size 256 |
-| Speculation | MTP3; measured acceptance 68.06% |
-| Context | 262,144 configured; 140,012-token prompt completed |
-| Scheduler | `max_num_seqs=12`, 8,192 batched tokens |
-| Execution | eager |
-| Thinking | enabled by default at High; `glm45` reasoning parser |
+¹ The TensorFold C1 prose/code cells were measured on the previous kit build (`80dba15`) with the same weights. Single-stream decode does not depend on the C8 admission settings, and the release build adds about +2.5% decode. Every other TensorFold cell is from the published config on `5624dfc`.
 
-The production run also passed deterministic arithmetic (`17 × 23 = 391`), tool-call parsing, endpoint health, and a 140K-token prompt. It completed with zero container restarts, zero OOM kills, and 372,827 realized KV-cache tokens.
+### Correctness gates
 
-### Thinking enabled by default
+| Gate | A: TensorFold | Mia EXL3 | NVFP4 LibertAIDAI | NVFP4 nvidia |
+|---|---|---|---|---|
+| Korean rare-token corruption probe (U+FFFD in output) | **clean** | clean | **corrupted (6–9 U+FFFD)** | clean |
+| Known-answer set (6 questions × thinking on/off) | 12/12 | 12/12 | 11/12 | 12/12 |
+| Count to 200, greedy | 3/3 | 3/3 | 3/3 | 3/3 |
+| Tool-call harness (42 calls, opencode-shaped) | 40/42, 0 corrupted | 39/42, 0 corrupted | 42/42 | not reached |
+| 42K-token tool-call nondeterminism repro | n/a (no logprobs) | 0/16 diverge | 0/16 diverge | not reached |
 
-The rank launcher now starts GLM-5.3 with thinking enabled at **High**:
+The Korean probe reproduces [mmastrac's report](https://github.com/mmastrac/glm-5.3-flash-4x-gx10) of intermittent mid-word corruption in the `LibertAIDAI/GLM-5.3-Flash-NVFP4` build. If you stay on the vLLM path, prefer another NVFP4 checkpoint and re-qualify.
 
-```json
-{"enable_thinking":true,"reasoning_effort":"high"}
-```
+### What else was tried
 
-The `glm45` reasoning parser keeps reasoning separate from final content in the OpenAI-compatible response. Clients can still send an explicit `reasoning_effort` when they need a different supported level; requests that omit it inherit High from the server.
+- **The TensorFold kit with its own defaults serves C8 strictly one request at a time** (C8 short-prompt e2e 89 tok/s). Its admission gate needs `GLM53_TF_BATCH_ADMIT_GB` (2 GB) of free device memory before admitting a second request, and a 2× Spark never has that once one request runs. Setting it to 0.25 GB admits all 8 slots within ~1.5 s. This is the main change in our profile.
+- **Multi-prompt prefill** (`GLM53_TF_MULTI_PREFILL`, kit default on) was A/B'd. It gives +61% short-prompt C8 (368 vs 228) but is about 15–25% slower when 8 long fresh prompts arrive at once (8 × 23K cold: 10.8 vs 12.7 tok/s; 8 × 56–58K: 4.5 vs 5.9, last first token 450 s vs 334 s). **We keep it on**, because agent traffic is mostly cached follow-ups plus short appends.
+- **Official `nvidia/GLM-5.3-Flash-NVFP4` on the vLLM path:** clean on correctness. Its BF16 MTP layer needs an `exclude_modules` patch and a non-Marlin MoE backend (`flashinfer_cutlass`), which leaves only a 300K-token KV pool. The head dropped to 1.5 GiB MemAvailable at C8 and the run was aborted by our memory guard. It is not viable on 2 Sparks at C8 as configured.
+- **vLLM NVFP4 overlays** (per-process memory cap 0.92, 2 ms shm spin-wait, prompt-token details): about +5–9% on C1/C8. Adding `--long-prefill-token-threshold 3584` dropped follow-up prefix-cache reuse from 76% to 29%, so we don't recommend it.
 
-The pinned checkpoint template ignores `enable_thinking=false`. Sending that
-flag alone can merge reasoning and final text in the response. See the
-[thinking-mode correction and measured tuning workflow](docs/tuning.md) before
-running non-thinking tests. The adaptation writes a separate template and
-preserves the verified checkpoint.
+### Known limits of path A
 
-## Why this adapter exists
+- 8 long **fresh** prompts arriving together prefill mostly in turn: the last one waits minutes for its first token (8 × 23K: up to 183 s; 8 × 58K: up to 450 s). Raise client HTTP timeouts accordingly.
+- No `logprobs`, no `n > 1`, no vLLM `/metrics` schema. [`tensorfold/grafana/`](tensorfold/grafana/) has an adapter for existing vLLM dashboards.
+- The DFlash2 drafter is **CC BY-NC-ND 4.0 (non-commercial)**. Check every weight's license against your use, or set `DRAFTER=` empty to use MTP drafts only (slower).
 
-GLM-5.3 is logically NoPE, while the current FlashInfer SM120/SM121 `fp8_ds_mla` GLM_NSA kernel uses a fixed physical ABI:
+---
 
-| Contract | Logical GLM-5.3 | Physical kernel ABI |
-|---|---:|---:|
-| absorbed query | 512 | 512 + 64 zero padding |
-| KV latent | 512 FP8 | 512 FP8 |
-| scale metadata | — | four FP32 values |
-| positional payload | none | 64 BF16 zeros |
-| cache bytes/token | — | 656 |
-| architecture sparse top-k | 2048 | — |
-| aligned sparse-buffer capacity | — | 2176 |
+## Path A — TensorFold quick start
 
-TP2 presents **32 local query heads** to each rank. The adapter therefore adds exact FlashInfer decode and prefill specializations for both `(32, 2176)` and the TP1 control `(64, 2176)`, pads the physical NoPE ABI with zeros, preserves per-row valid lengths, and rebuilds the AOT module for GB10/SM121a.
+This layers our C8 profile on the upstream kit. Follow the kit's own [`AGENTS.md`](https://github.com/jayleaton/glm53-tensorfold-spark/blob/main/AGENTS.md) for node checks, link settings and troubleshooting.
 
-No model tensor or Hugging Face configuration field is rewritten. See [`docs/adaptation.md`](docs/adaptation.md) and [`docs/tp2-h32-specialization.md`](docs/tp2-h32-specialization.md).
+**Requirements:** two DGX Sparks cabled CX7 to CX7 with an IP on the link, Docker with the NVIDIA runtime on both, and passwordless SSH from the head to the worker. Each node needs about 165 GB for the checkpoint plus about 84 GB for prepared weights. Sudo is **not** required.
 
-## Repository contents
-
-- `container/` — digest-pinned ARM64 vLLM image and FlashInfer specialization patch.
-- `overlay/` — small runtime compatibility overlay for the GLM NoPE physical ABI.
-- `scripts/build-image.sh` — reproducible local image build.
-- `scripts/rank-tp2.sh` — parameterized rank launcher for two DGX Sparks.
-- `scripts/start-tp2.sh` / `scripts/stop-tp2.sh` — worker-first TP2 lifecycle.
-- `bench/benchmark.py` — the frozen C1/C4/C6/C8 benchmark harness.
-- `bench/tune.py` — experimental counting, coding, reasoning, and mixed-task measurements.
-- `bench/task_latency.py` — complete coding/tool answers, execution checks, and long-prompt latency.
-- `docs/mtp-comparison.md` — controlled MTP-depth comparison protocol and selection criteria.
-- `docs/tuning.md` — hardware qualification, template correction, and tuning procedure.
-- `results/` — sanitized historical and tuning benchmark receipts.
-
-Model weights, Docker layers, CUDA caches, host configuration, credentials, and private logs are intentionally not included.
-
-## Quick start
-
-### 1. Prepare both nodes
-
-Requirements:
-
-- two NVIDIA DGX Spark systems with Docker and NVIDIA Container Toolkit;
-- the same source revision and identical built image on both nodes;
-- passwordless SSH from the head to the worker;
-- a working RoCE interface/HCA on both nodes;
-- enough local storage for the approximately 181 GiB checkpoint.
-
-Acquire the checkpoint independently at the pinned revision:
+### 1. Kit and weights (both nodes)
 
 ```bash
-hf download LibertAIDAI/GLM-5.3-Flash-NVFP4 \
-  --revision 9e0d74e3cef17f634e84fb8e2223707e02616290 \
-  --local-dir /models/GLM-5.3-Flash-NVFP4
+git clone --recurse-submodules https://github.com/jayleaton/glm53-tensorfold-spark ~/glm53-tensorfold-spark
+cd ~/glm53-tensorfold-spark && git checkout 5624dfc6fce32d747727eaf4dbda98999f868066 && git submodule update --init
+
+hf download brandonmusic/GLM-5.3-Flash-tr3-4bpw --revision 5ab363a8dcf6405955fd5f99671e01a1c9fb124b
+hf download incoai/GLM-5.3-Flash-DFlash2 --revision 7d74cdd881ed7e32c31175984a67823127b66cfe   # CC BY-NC-ND 4.0
 ```
 
-### 2. Build once and distribute the runtime image
-
-Clone the repository on both nodes. Build on the head, then replace `user@worker`
-below with the worker SSH target to distribute the exact image:
+### 2. Config (head)
 
 ```bash
-git clone https://github.com/LimeChain/glm-5.3-flash-2xdgx-spark-vllm.git
-cd glm-5.3-flash-2xdgx-spark-vllm
-IMAGE=glm53-sm121:local ./scripts/build-image.sh
-docker image save glm53-sm121:local | ssh user@worker docker image load
+git clone https://github.com/LimeChain/glm-5.3-flash-2xdgx-spark ~/glm-5.3-flash-2xdgx-spark
+cp ~/glm-5.3-flash-2xdgx-spark/tensorfold/config/prod-c8.env.example ~/glm53-tensorfold-spark/config/prod.env
+$EDITOR ~/glm53-tensorfold-spark/config/prod.env
 ```
 
-The build starts from the immutable ARM64 base image in [`config/versions.env`](config/versions.env), patches the exact FlashInfer sources, recompiles the SM121a AOT module, and validates the resulting runtime contract.
+Fill in `WORKER_SSH`, `HEAD_IP`, `HEAD_HF`, `WORKER_HF`, and check `NCCL_SOCKET_IFNAME` / `NCCL_IB_HCA` against `ibdev2netdev`. Leave everything else as shipped: the header of [`prod-c8.env.example`](tensorfold/config/prod-c8.env.example) lists each value that differs from the kit's release config and why.
 
-### 3. Configure the cluster
+### 3. Build, start, verify
 
 ```bash
-cp config/cluster.env.example config/cluster.env
-$EDITOR config/cluster.env
+cd ~/glm53-tensorfold-spark
+scripts/serve.sh build            # builds the image and ships it to the worker
+scripts/serve.sh preflight
+TF_KIT=~/glm53-tensorfold-spark ~/glm-5.3-flash-2xdgx-spark/tensorfold/scripts/tf-prod.sh start
+curl -s http://127.0.0.1:8000/v1/models
 ```
 
-Set the worker SSH target, repository/model/cache paths, fabric addresses,
-interface, and HCA names. Create the corresponding config on the worker using
-that node's local model/cache paths. `REMOTE_ROOT` identifies its repository
-path. Do not overwrite worker paths with the head's paths when synchronizing
-source files. Preflight compares image identity, engine settings, and model
-metadata before either rank starts; full checkpoint byte verification is
-described in [the tuning guide](docs/tuning.md).
+The first start compiles kernels and writes prepared weights (about 10 minutes); later starts take 20–60 s. `tf-prod.sh start` evicts page cache on both nodes first (no sudo) and refuses to report READY until all 8 slots have loaded. Without that step, a node that just copied weights boots with **1 slot** and serves one request at a time.
 
-### 4. Preflight and start
-
-Run on the head node:
+### 4. Operate
 
 ```bash
-./scripts/preflight-tp2.sh
-./scripts/start-tp2.sh
+tf-prod.sh status | stop | restart
+# watchdog: restart after 3 failed health checks (stop sets a DISABLED marker so it stays down)
+( crontab -l; echo "* * * * * TF_KIT=$HOME/glm53-tensorfold-spark $HOME/glm-5.3-flash-2xdgx-spark/tensorfold/scripts/tf-prod.sh watch" ) | crontab -
 ```
 
-The API binds to loopback on the head by default. Verify it:
+Clients: base URL `http://127.0.0.1:8000/v1`, model `glm-5.3-flash`, context 1,048,576. Thinking is on at High by default and returned in both `reasoning` and `reasoning_content`. The API has no auth and binds to loopback; put an authenticating proxy in front before exposing it.
+
+### Grafana / Prometheus
+
+[`tensorfold/grafana/tf_vllm_adapter.py`](tensorfold/grafana/tf_vllm_adapter.py) (stdlib only, runs on the head) turns TensorFold's metrics and request log into `vllm:*` series: tokens, prefix-cache hits, running/waiting, KV %, finish reasons, and TTFT/TPOT/E2E/length histograms.
+- Add it as a second target of your vLLM scrape job ([example](tensorfold/grafana/prometheus-scrape.example.yml)).
+- It goes silent when vLLM serves the API port again, so the same dashboard works for both paths.
+- Approximations: running = in-flight capped at the slot count; KV % comes from the last finished request; histograms cover completed requests only.
+
+---
+
+## Path B — vLLM + NVFP4
+
+The original recipe (FlashInfer sparse-MLA TP2 specialization, FP8 KV, MTP3, 262K context) is unchanged and documented in [`docs/vllm-path.md`](docs/vllm-path.md), together with its historical benchmark receipts, the MTP-depth comparison and the tuning guides. Its bake-off numbers are the "NVFP4 LibertAIDAI" column above.
+
+## Reproduce the bake-off
 
 ```bash
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/v1/models
+# on the head, against either path's endpoint; reports go to results/<arm>/
+MODEL=glm-5.3-flash WORKER_SSH=user@worker python3 bench/bakeoff_suite.py --arm my-run --out results/my-run \
+    --base http://127.0.0.1:8000 --model glm-5.3-flash [--no-logprobs]    # --no-logprobs for TensorFold
+python3 bench/bakeoff_summarize.py results/my-run
 ```
 
-Stop both ranks with:
+Sections: api, correct, korean, count, toolcall, c1, repo (C1/C8 short), c8think, c8x19k (cold + follow-up), depth, prefill128k and ping120k. A memory guard cancels the run if either node's MemAvailable stays under 2 GiB.
 
-```bash
-./scripts/stop-tp2.sh
-```
+## Credits and licensing
 
-Detailed setup and safety notes are in [`docs/two-node-deployment.md`](docs/two-node-deployment.md).
-
-## Reproduce the benchmark
-
-With a drained local endpoint:
-
-```bash
-python3 bench/benchmark.py \
-  --base http://127.0.0.1:8000 \
-  --label my-cold-run-1 \
-  --output results/my-cold-run-1.json
-```
-
-Run it after each independent cold start. The harness is frozen to C1/C4/C6/C8, one warm-up wave, three measured waves, and 512 completion tokens. Throughput excludes the first streamed token and measures active delivery time.
-
-## Validation boundaries of the original 262K profile
-
-- **262,144 tokens is the configured context window.** The completed long-context qualification used a 140,012-token prompt.
-- `max_num_seqs=12` is an admission ceiling, not a C12 throughput result. During the admission test, nine requests ran and three waited; no C12 throughput is claimed.
-- The benchmark does not establish model-quality equivalence, global speed leadership, or a matched comparison with other public recipes.
-- C1/C4/C6/C8 results bind the exact production source/profile identified in the receipt. Re-run before publishing numbers for a materially changed image or configuration.
-- The published throughput receipt predates this default-thinking launcher change. The historical harness explicitly requests `enable_thinking=false`, which the pinned template ignores; rerunning that harness alone does not qualify High-reasoning or actual non-thinking behavior. Use the corrected template and separate quality/performance tests in `docs/tuning.md`.
-- Eager execution is the original qualified 262K profile. The separate 64K tuning campaign documents its graph configuration and validation limits.
-
-## Provenance and licensing
-
-This snapshot builds on the GLM-5.3 GB10 adapter work by [`cyijun`](https://github.com/cyijun/glm-5.3-flash-nvfp4-gb10), with the TP2 32-local-head specialization and production qualification performed by Christian Veselinov / LimeChain.
-
-The source adapter did not expose a repository-level license when this snapshot was prepared. Existing per-file and upstream notices remain authoritative; this repository does not invent or imply a new license grant. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
-## Credits
-
-- [vLLM](https://github.com/vllm-project/vllm)
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer)
-- [`cyijun/glm-5.3-flash-nvfp4-gb10`](https://github.com/cyijun/glm-5.3-flash-nvfp4-gb10)
-- [`LibertAIDAI/GLM-5.3-Flash-NVFP4`](https://huggingface.co/LibertAIDAI/GLM-5.3-Flash-NVFP4)
+- TensorFold engine: [ashhart/TensorFold](https://github.com/ashhart/TensorFold) (MIT). 2× Spark kit and patches: [jayleaton/glm53-tensorfold-spark](https://github.com/jayleaton/glm53-tensorfold-spark) (Apache-2.0). This repository ships only a config profile and ops scripts on top of that kit.
+- vLLM path: see [`docs/vllm-path.md`](docs/vllm-path.md) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+- Compared, not redistributed: [MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks). Correctness probes are adapted from [mmastrac/glm-5.3-flash-4x-gx10](https://github.com/mmastrac/glm-5.3-flash-4x-gx10); the tool-call harness is from the TensorFold kit (Apache-2.0).
+- Weights are external and not included: `brandonmusic/GLM-5.3-Flash-tr3-4bpw`, `incoai/GLM-5.3-Flash-DFlash2` (CC BY-NC-ND 4.0), and the NVFP4 checkpoints on the vLLM path. Their licenses apply.
+- Measurements and the C8 profile: Christian Veselinov / LimeChain.

@@ -13,3 +13,6 @@ results/2026-09-21/*
 results/2026-09-22/*
 !results/2026-09-22/*.json
 !results/2026-09-22/README.md
+!results/2026-09-30-bakeoff/
+results/2026-09-30-bakeoff/*
+!results/2026-09-30-bakeoff/*.json

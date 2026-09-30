@@ -1,0 +1,108 @@
+{
+ "arm": "tfopt-q1-5624dfc-multi",
+ "known_answer": null,
+ "count200": null,
+ "repo": {
+  "c1": {
+   "per_stream": 99.42,
+   "agg_decode": 99.4,
+   "agg_e2e": 94.85
+  },
+  "c8": {
+   "per_stream": 46.02,
+   "agg_decode": 367.72,
+   "agg_e2e": 350.62
+  }
+ },
+ "c8think": {
+  "aggregate_e2e_tok_s": 93.19,
+  "decode_median_tok_s": 14.37,
+  "ttft_max_s": 0.878,
+  "peak_waiting": null,
+  "errors": 0,
+  "spec_acceptance_pct": null,
+  "completion_tokens_total": 10038
+ },
+ "c8x19k": {
+  "cold": {
+   "aggregate_e2e_tok_s": 10.78,
+   "decode_median_tok_s": 14.39,
+   "decode_min_tok_s": 9.46,
+   "ttft_min_s": 25.485,
+   "ttft_median_s": 111.982,
+   "ttft_max_s": 183.372,
+   "peak_running": null,
+   "peak_waiting": null,
+   "peak_kv_pct": null,
+   "metric_cache_hit_pct": null,
+   "usage_cached_pct": 0.0,
+   "new_preemptions": null,
+   "errors": 0,
+   "all_overlap_s": 0.0,
+   "wall_s": 188.98,
+   "min_head_gib": 14.75,
+   "min_worker_gib": 14.88,
+   "prompt0": 21696
+  },
+  "follow": {
+   "aggregate_e2e_tok_s": 46.01,
+   "decode_median_tok_s": 13.33,
+   "decode_min_tok_s": 7.39,
+   "ttft_min_s": 1.284,
+   "ttft_median_s": 4.899,
+   "ttft_max_s": 4.979,
+   "peak_running": null,
+   "peak_waiting": null,
+   "peak_kv_pct": null,
+   "metric_cache_hit_pct": null,
+   "usage_cached_pct": 98.7,
+   "new_preemptions": null,
+   "errors": 0,
+   "all_overlap_s": 3.16,
+   "wall_s": 9.8,
+   "min_head_gib": 14.5,
+   "min_worker_gib": 14.83,
+   "prompt0": 21956
+  }
+ },
+ "depth": {
+  "max_ok_prompt_tokens": null,
+  "levels": [
+   {
+    "target": 48000,
+    "ok_8way": false,
+    "aggregate_e2e_tok_s": 4.49,
+    "decode_median_tok_s": 31.38,
+    "decode_min_tok_s": 18.75,
+    "ttft_min_s": 57.11,
+    "ttft_median_s": 285.08,
+    "ttft_max_s": 450.403,
+    "peak_running": null,
+    "peak_waiting": null,
+    "peak_kv_pct": null,
+    "metric_cache_hit_pct": null,
+    "usage_cached_pct": 0.0,
+    "new_preemptions": null,
+    "errors": 0,
+    "all_overlap_s": 0.0,
+    "wall_s": 455.76,
+    "min_head_gib": 12.9,
+    "min_worker_gib": 13.24,
+    "prompt0": 58128
+   }
+  ]
+ },
+ "ping120k": {
+  "big_ttft": 132.815,
+  "ping_ttft": 1.464,
+  "big_prompt": 144985,
+  "errs": [
+   null,
+   null
+  ]
+ },
+ "memfloor": {
+  "min_head_gib": 12.9,
+  "min_worker_gib": 13.24
+ }
+}

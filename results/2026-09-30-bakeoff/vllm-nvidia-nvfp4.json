@@ -1,0 +1,70 @@
+{
+ "arm": "armB-nvidia-nvfp4",
+ "api": {
+  "alias": true,
+  "max_len": [
+   262144
+  ],
+  "think_default_ok": true
+ },
+ "known_answer": "12/12",
+ "count200": "3/3",
+ "korean": {
+  "verbatim": "6/6",
+  "fffd": 0,
+  "mid_word": 0,
+  "weird_scripts": 0
+ },
+ "c1": {
+  "prose_off": {
+   "tok_s": 21.68,
+   "ttft": 0.351,
+   "toks": 983,
+   "acc": 41.8
+  },
+  "prose_high": {
+   "tok_s": 21.49,
+   "ttft": 0.338,
+   "toks": 1035,
+   "acc": 42.8
+  },
+  "code_off": {
+   "tok_s": 29.5,
+   "ttft": 0.406,
+   "toks": 1024,
+   "acc": 73.8
+  },
+  "code_high": {
+   "tok_s": 30.11,
+   "ttft": 0.359,
+   "toks": 2048,
+   "acc": 75.0
+  }
+ },
+ "repo": {
+  "c1": {
+   "per_stream": 37.62,
+   "agg_decode": 36.19,
+   "agg_e2e": 35.56
+  },
+  "c8": {
+   "per_stream": 25.03,
+   "agg_decode": 199.2,
+   "agg_e2e": 113.53
+  }
+ },
+ "c8think": {
+  "aggregate_e2e_tok_s": 0.0,
+  "decode_median_tok_s": null,
+  "ttft_max_s": 8.607,
+  "peak_waiting": 1.0,
+  "errors": 8,
+  "spec_acceptance_pct": 63.1,
+  "completion_tokens_total": 0
+ },
+ "memfloor": {
+  "min_head_gib": 1.53,
+  "min_worker_gib": 5.9
+ },
+ "GUARD_MEMORY": "{\"t\": 1790724118.4667027, \"head\": 1828917248, \"worker\": 6617690112}"
+}

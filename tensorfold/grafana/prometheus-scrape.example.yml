@@ -1,0 +1,8 @@
+# Add the adapter as a second target of the SAME job your vLLM dashboard queries.
+# While TensorFold serves, only the adapter emits vllm:* series; when vLLM is back on the API port, the adapter goes
+# silent and vLLM's own /metrics fills the same panels. No dashboard edits in either direction.
+- job_name: vllm_dgx_sparks
+  static_configs:
+  - targets: ['HEAD:8000']        # the API port: vLLM /metrics, or TensorFold's native tensorfold_* metrics
+  - targets: ['HEAD:8892']        # tf_vllm_adapter.py
+    labels: {source: tf-vllm-adapter}

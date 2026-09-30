@@ -1,0 +1,22 @@
+{
+ "arm": "tf-final-correct",
+ "api": {
+  "alias": true,
+  "max_len": [
+   1048576
+  ],
+  "think_default_ok": true
+ },
+ "known_answer": "12/12",
+ "count200": "3/3",
+ "korean": {
+  "verbatim": "6/6",
+  "fffd": 0,
+  "mid_word": 0,
+  "weird_scripts": 0
+ },
+ "memfloor": {
+  "min_head_gib": 17.88,
+  "min_worker_gib": 18.11
+ }
+}
