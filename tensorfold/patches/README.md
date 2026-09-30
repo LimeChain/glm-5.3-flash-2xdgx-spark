@@ -36,3 +36,9 @@ The patch adds one integer (`logprobs`) to the request header that rank 0 sends 
 - C8 mixed (4 with logprobs, 4 without, sampled): 8/8 `stop`, all valid.
 - `/v1/completions` legacy object.
 - Speed A/B, same session, 2 runs each (`bench/bakeoff_suite.py --only repo`, no logprobs asked): C8 short-prompt aggregate 363 / 329 tok/s unpatched vs 362 / 368 patched; C1 99 / 72 vs 99 / 99. No measurable cost.
+
+## 9002 — stop at `<|assistant|>` (in the same patch file and overlay)
+
+GLM-5.3 lists `<|endoftext|>`, `<|user|>` and `<|observation|>` as end tokens, but on short exact-format replies it ends the turn with `<|assistant|>` and then writes a fake next turn into the answer (`...</score_A><|assistant|>We need answer exactly...`), logprobs included. `extra_stop()` (engine.py) adds `<|assistant|>` and generation_config's `eos_token_id` to the stop set by token id at load, on both ranks, before the engine and the batcher copy it. The decode loops already compare ids and cut a drafted window at the first stop token. `GLM53_TF_EXTRA_STOP` overrides the list (empty turns it off).
+
+Verified: `Output exactly: <score_A> B </score_A>` with top_logprobs 20 and reasoning high, 10 seeds (5 streamed, 5 not). Before the fix, 10/10 leaked a fake turn. After it, 10/10 return exactly the answer with `finish_reason: stop`, and the last logprob token is `>`. The OpenAI `stop` parameter is honored too.

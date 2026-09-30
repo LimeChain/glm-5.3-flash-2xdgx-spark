@@ -261,6 +261,7 @@ class GlmEngine:
                              "would decode one token: pull the draft model on both machines (--drafter), or pass "
                              "--no-drafts to both for the serial reference")
         self.w = w
+        extra_stop(w.cfg, model_dir)            # patches/9002: <|assistant|> ends a reply too (before any eos copy)
         # patches/0500: GLM53_TF_VISION=1: rank 0 loads the vision tower (BF16, ~1.13 GB) and encodes a request's
         # images; rank 1 needs none (it receives the rows with the prompt, whatever its own setting)
         from . import vision_prep
@@ -1258,3 +1259,32 @@ class GlmEngine:
             with self._knobs(values):
                 self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
                           sess, vis)
+
+
+def extra_stop(cfg, model_dir) -> None:
+    """patches/9002: stop tokens beyond config.json's eos_token_id. GLM-5.3 lists <|endoftext|>, <|user|> and
+    <|observation|>, but the model also ends short exact-format replies with <|assistant|> and then writes a fake next
+    turn. GLM53_TF_EXTRA_STOP (comma-separated special-token strings, default "<|assistant|>"; empty = off) adds
+    them by token id, also from generation_config.json's eos_token_id. Applied on both ranks, before the engine and
+    the batcher copy ``cfg.eos``; the decode loops compare token ids, so a drafted window is cut at the stop."""
+
+    import json
+    import os
+    from pathlib import Path
+
+    d = Path(model_dir)
+    ids = list(cfg.eos)
+    try:
+        gen = json.loads((d / "generation_config.json").read_text()).get("eos_token_id")
+        ids += [int(x) for x in (gen if isinstance(gen, list) else [gen] if gen is not None else [])]
+    except (OSError, ValueError):
+        pass
+    names = [x.strip() for x in os.environ.get("GLM53_TF_EXTRA_STOP", "<|assistant|>").split(",") if x.strip()]
+    if names:
+        tok = json.loads((d / "tokenizer.json").read_text())
+        table = {a["content"]: int(a["id"]) for a in tok.get("added_tokens", [])}
+        for n in names:
+            if n not in table:
+                raise ValueError(f"GLM53_TF_EXTRA_STOP: {n!r} is not a special token of this tokenizer")
+            ids.append(table[n])
+    cfg.eos = tuple(dict.fromkeys(ids))
