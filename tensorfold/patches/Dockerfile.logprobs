@@ -1,0 +1,12 @@
+# TensorFold 5624dfc + patches/9001 (logprobs): overlays the patched Python files (overlay/tensorfold, i.e. the kit's
+# 5624dfc tree with 9001 applied) on the kit's image. Build from tensorfold/patches/ on BOTH nodes:
+#   docker build --build-arg BASE=glm53-tensorfold:dev -t glm53-tensorfold:lp9001 -f Dockerfile.logprobs overlay
+ARG BASE=glm53-tensorfold:dev
+FROM ${BASE}
+ARG PKG=/usr/local/lib/python3.12/dist-packages/tensorfold
+COPY tensorfold/cuda/server.py ${PKG}/cuda/server.py
+COPY tensorfold/families/glm5_next/cuda/batch.py ${PKG}/families/glm5_next/cuda/batch.py
+COPY tensorfold/families/glm5_next/cuda/decode.py ${PKG}/families/glm5_next/cuda/decode.py
+COPY tensorfold/families/glm5_next/cuda/engine.py ${PKG}/families/glm5_next/cuda/engine.py
+COPY tensorfold/families/glm5_next/cuda/knobs.py ${PKG}/families/glm5_next/cuda/knobs.py
+RUN python -c "import tensorfold.cuda.server as s, tensorfold.families.glm5_next.cuda.batch, tensorfold.families.glm5_next.cuda.decode as d; assert d.logprob_rows and s.logprobs_request; print('patches/9001 ok')"

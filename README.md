@@ -45,7 +45,7 @@ One pair of DGX Sparks, one arm at a time with nothing else on the GPUs. The mat
 | Known-answer set (6 questions × thinking on/off) | 12/12 | 12/12 | 11/12 | 12/12 |
 | Count to 200, greedy | 3/3 | 3/3 | 3/3 | 3/3 |
 | Tool-call harness (42 calls, opencode-shaped) | 40/42, 0 corrupted | 39/42, 0 corrupted | 42/42 | not reached |
-| 42K-token tool-call nondeterminism repro | n/a (no logprobs) | 0/16 diverge | 0/16 diverge | not reached |
+| 42K-token tool-call nondeterminism repro | not run (needs logprobs; patch 9001 now provides them) | 0/16 diverge | 0/16 diverge | not reached |
 
 The Korean probe reproduces [mmastrac's report](https://github.com/mmastrac/glm-5.3-flash-4x-gx10) of intermittent mid-word corruption in the `LibertAIDAI/GLM-5.3-Flash-NVFP4` build. If you stay on the vLLM path, prefer another NVFP4 checkpoint and re-qualify.
 
@@ -59,7 +59,7 @@ The Korean probe reproduces [mmastrac's report](https://github.com/mmastrac/glm-
 ### Known limits of path A
 
 - 8 long **fresh** prompts arriving together prefill mostly in turn: the last one waits minutes for its first token (8 × 23K: up to 183 s; 8 × 58K: up to 450 s). Raise client HTTP timeouts accordingly.
-- No `logprobs`, no `n > 1`, no vLLM `/metrics` schema. [`tensorfold/grafana/`](tensorfold/grafana/) has an adapter for existing vLLM dashboards.
+- `logprobs` / `top_logprobs` (≤ 20, answer tokens only, streaming included) need our patch [9001](tensorfold/patches/README.md): the kit alone returns `null`. There is no `n > 1`, and each request should send its own `seed` for varied samples: without one the kit derives the seed from the prompt, so identical requests return identical text. There is no vLLM `/metrics` schema; [`tensorfold/grafana/`](tensorfold/grafana/) has an adapter.
 - The DFlash2 drafter is **CC BY-NC-ND 4.0 (non-commercial)**. Check every weight's license against your use, or set `DRAFTER=` empty to use MTP drafts only (slower).
 
 ---
@@ -99,6 +99,8 @@ scripts/serve.sh preflight
 TF_KIT=~/glm53-tensorfold-spark ~/glm-5.3-flash-2xdgx-spark/tensorfold/scripts/tf-prod.sh start
 curl -s http://127.0.0.1:8000/v1/models
 ```
+
+For OpenAI `logprobs` (verifiers, best-of-N scoring), build the patched image once on both nodes and set `IMAGE=glm53-tensorfold:lp9001` before starting ([`tensorfold/patches/`](tensorfold/patches/README.md)). The profile expects that image.
 
 The first start compiles kernels and writes prepared weights (about 10 minutes); later starts take 20–60 s. `tf-prod.sh start` evicts page cache on both nodes first (no sudo) and refuses to report READY until all 8 slots have loaded. Without that step, a node that just copied weights boots with **1 slot** and serves one request at a time.
 

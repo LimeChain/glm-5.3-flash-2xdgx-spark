@@ -1,0 +1,433 @@
+diff --git a/src/tensorfold/cuda/server.py b/src/tensorfold/cuda/server.py
+index c1c729b..6cd38ae 100644
+--- a/src/tensorfold/cuda/server.py
++++ b/src/tensorfold/cuda/server.py
+@@ -314,6 +314,83 @@ def token_ids_problem(prompt: Any, vocab: int | None) -> str | None:
+     return None
+ 
+ 
++# -- patches/9001: logprobs -----------------------------------------------------------------------
++
++LOGPROBS_MAX = 20
++
++
++def logprobs_request(body: dict[str, Any], chat: bool) -> tuple[bool, int]:
++    """(logprobs wanted, top alternatives 0..20) from a request; ValueError when malformed. Chat: ``logprobs`` bool
++    plus ``top_logprobs``; completions: ``logprobs`` an integer (the alternatives), as OpenAI / vLLM take them."""
++
++    lp = body.get("logprobs")
++    if chat:
++        if lp is None or lp is False:
++            if body.get("top_logprobs"):
++                raise ValueError("top_logprobs needs \"logprobs\": true")
++            return False, 0
++        if lp is not True:
++            raise ValueError("logprobs must be true or false on /v1/chat/completions")
++        top = body.get("top_logprobs")
++        top = 0 if top is None else top
++    else:
++        if lp is None or lp is False:
++            return False, 0
++        top = 0 if lp is True else lp
++    if isinstance(top, bool) or not isinstance(top, int) or not 0 <= top <= LOGPROBS_MAX:
++        raise ValueError(f"top_logprobs must be an integer from 0 to {LOGPROBS_MAX} (got {top!r})")
++    return True, int(top)
++
++
++def _byte_decoder() -> dict[str, int]:
++    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("\xa1"), ord("\xac") + 1)) \
++        + list(range(ord("\xae"), ord("\xff") + 1))
++    cs = bs[:]
++    n = 0
++    for b in range(256):
++        if b not in bs:
++            bs.append(b)
++            cs.append(256 + n)
++            n += 1
++    return {chr(c): b for b, c in zip(bs, cs)}
++
++
++_BYTES = _byte_decoder()
++
++
++def token_bytes(tok, tid: int) -> list[int]:
++    """The raw bytes of one token id (byte-level BPE pieces mapped back; added/special tokens as UTF-8)."""
++
++    piece = tok.id_to_token(int(tid))
++    if piece is None:
++        return []
++    if all(ch in _BYTES for ch in piece):
++        return [_BYTES[ch] for ch in piece]
++    return list(piece.encode("utf-8"))
++
++
++def lp_entry(tok, tid: int, lp: float, tops: list[tuple[int, float]], top: int) -> dict[str, Any]:
++    def one(t: int, v: float) -> dict[str, Any]:
++        b = token_bytes(tok, t)
++        return {"token": bytes(b).decode("utf-8", errors="replace"), "logprob": float(v), "bytes": b}
++
++    e = one(tid, lp)
++    e["top_logprobs"] = [one(t, v) for t, v in tops[:top]]
++    return e
++
++
++def legacy_logprobs(entries: list[dict[str, Any]]) -> dict[str, Any]:
++    """``/v1/completions``' logprobs object from chat-style entries."""
++
++    offs, at = [], 0
++    for e in entries:
++        offs.append(at)
++        at += len(e["token"])
++    return {"tokens": [e["token"] for e in entries], "token_logprobs": [e["logprob"] for e in entries],
++            "top_logprobs": [{t["token"]: t["logprob"] for t in e["top_logprobs"]} for e in entries],
++            "text_offset": offs}
++
++
+ # -- chat template -------------------------------------------------------------------------
+ 
+ class ChatTemplate:
+@@ -399,6 +476,10 @@ class App:
+             problem = token_ids_problem(body["prompt"], self.vocab_size())
+             if problem:
+                 return Problem(problem, param="prompt")
++        try:                                        # patches/9001
++            logprobs_request(body, "messages" in body)
++        except ValueError as exc:
++            return Problem(str(exc), param="logprobs")
+         n = body.get("n")
+         if n is not None and n != 1:
+             return f"n must be 1 on this server (got {n!r}): it returns one choice a request"
+@@ -487,6 +568,34 @@ class App:
+         stops = parse_stop(body.get("stop"))
+         hit = {"stop": False, "at": 0}
+         stream = StreamDecoder(self.tok, tuple(self.engine.eos))
++        # patches/9001: logprobs of the ANSWER tokens (after </think> when thinking; never the reasoning, never EOS)
++        want_lp, top_lp = logprobs_request(body, chat)
++        lp_sink: list = []
++        lp_state = {"answer_from": None if (chat and thinking) else 0, "sent": 0}
++        think_end = self.tok.token_to_id(_THINK_END) if chat and thinking else None
++        eos_set = set(self.engine.eos)
++        req = getattr(self.engine, "request", None)
++        if req is not None:
++            req.logprobs = (top_lp if top_lp > 0 else 1) if want_lp else 0
++            req.lp_sink = lp_sink if want_lp else None
++
++        def answer_lps(upto: int) -> list[dict[str, Any]]:
++            """Entries for answer tokens out[lp_state.sent:upto] (advances ``sent``)."""
++            start = lp_state["answer_from"]
++            if start is None:
++                return []
++            lo = max(lp_state["sent"], start)
++            hi = min(upto, len(lp_sink))
++            got = []
++            for i in range(lo, hi):
++                if out[i] in eos_set:
++                    continue
++                if lp_sink[i] is None:
++                    raise RuntimeError(f"logprobs: token {i} of the reply has no logprob row")
++                lp, tops = lp_sink[i]
++                got.append(lp_entry(self.tok, out[i], lp, tops, top_lp))
++            lp_state["sent"] = max(lp_state["sent"], hi)
++            return got
+ 
+         def visible(finished: bool) -> tuple[str, str]:
+             raw = stream.final() if finished else stream.text
+@@ -499,7 +608,10 @@ class App:
+             return reasoning, answer
+ 
+         def on_tokens(new: list[int]) -> bool:
++            base = len(out)
+             out.extend(new)
++            if want_lp and lp_state["answer_from"] is None and think_end is not None and think_end in new:
++                lp_state["answer_from"] = base + new.index(think_end) + 1      # patches/9001
+             if hit["stop"]:                         # patches/0160: past a stop string: nothing more is sent
+                 return True
+             stream.add(new)
+@@ -518,6 +630,8 @@ class App:
+             if len(answer) > sent["content"]:
+                 delta["content"] = answer[sent["content"]:]
+                 sent["content"] = len(answer)
++            if want_lp and "content" in delta:      # patches/9001: the answer tokens received so far
++                delta["_logprobs"] = answer_lps(hit["at"] if hit["stop"] else len(out))
+             if delta and not emit(delta):
+                 stopped["client"] = True
+             # patches/0160: True after a stop string too; the batch engine (GLM53_TF_BATCH) then ends the request
+@@ -555,8 +669,23 @@ class App:
+         else:
+             finish = "length"
+         used = hit["at"] if stopped_at >= 0 and hit["stop"] else len(out)
+-        return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
+-                "prompt_tokens": len(prompt), "completion_tokens": used, "stats": stats}
++        result = {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
++                  "prompt_tokens": len(prompt), "completion_tokens": used, "stats": stats}
++        if want_lp:                                 # patches/9001
++            if req is not None:
++                req.logprobs, req.lp_sink = 0, None
++            if len(lp_sink) < len(out):
++                raise RuntimeError(f"logprobs: {len(out)} tokens, {len(lp_sink)} logprob rows (engine without "
++                                   "logprobs support?)")
++            tail = answer_lps(used)
++            if tail and final:
++                final["_logprobs"] = tail
++            elif tail:
++                result["lp_tail"] = tail
++            everything = dict(lp_state, sent=0)
++            lp_state.update(everything)
++            result["logprobs"] = answer_lps(used)
++        return result
+ 
+ 
+ def make_handler(app: App):
+@@ -624,11 +753,17 @@ def make_handler(app: App):
+             kind = "chat.completion.chunk" if chat else "text_completion"
+ 
+             def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
++                delta = dict(delta)
++                lp = delta.pop("_logprobs", None)          # patches/9001: this chunk's answer-token logprobs
+                 if chat:
+-                    return {"id": rid, "object": kind, "created": created, "model": app.served,
+-                            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+-                return {"id": rid, "object": kind, "created": created, "model": app.served,
+-                        "choices": [{"index": 0, "text": delta.get("content", ""), "finish_reason": finish}]}
++                    choice = {"index": 0, "delta": delta, "finish_reason": finish}
++                    if lp is not None:
++                        choice["logprobs"] = {"content": lp}
++                    return {"id": rid, "object": kind, "created": created, "model": app.served, "choices": [choice]}
++                choice = {"index": 0, "text": delta.get("content", ""), "finish_reason": finish}
++                if lp is not None:
++                    choice["logprobs"] = legacy_logprobs(lp)
++                return {"id": rid, "object": kind, "created": created, "model": app.served, "choices": [choice]}
+ 
+             if stream:
+                 self.send_response(200)
+@@ -663,6 +798,8 @@ def make_handler(app: App):
+                     return
+                 if result["final"]:
+                     emit(result["final"])
++                elif result.get("lp_tail"):                # patches/9001: answer logprobs not sent with a delta yet
++                    emit({"_logprobs": result["lp_tail"]})
+                 if result["calls"]:
+                     for i, call in enumerate(result["calls"]):
+                         emit({"tool_calls": [{"index": i, "id": call["id"], "type": "function",
+@@ -698,13 +835,17 @@ def make_handler(app: App):
+                     message.update(reasoning_fields(result["reasoning"]))      # patches/0160
+                 if result["calls"]:
+                     message["tool_calls"] = result["calls"]
++                choice = {"index": 0, "message": message, "finish_reason": result["finish"]}
++                if result.get("logprobs") is not None:      # patches/9001
++                    choice["logprobs"] = {"content": result["logprobs"]}
+                 payload = {"id": rid, "object": "chat.completion", "created": created, "model": app.served,
+-                           "choices": [{"index": 0, "message": message, "finish_reason": result["finish"]}],
+-                           "usage": usage, "tensorfold": result["stats"]}
++                           "choices": [choice], "usage": usage, "tensorfold": result["stats"]}
+             else:
++                choice = {"index": 0, "text": result["content"], "finish_reason": result["finish"]}
++                if result.get("logprobs") is not None:      # patches/9001
++                    choice["logprobs"] = legacy_logprobs(result["logprobs"])
+                 payload = {"id": rid, "object": "text_completion", "created": created, "model": app.served,
+-                           "choices": [{"index": 0, "text": result["content"], "finish_reason": result["finish"]}],
+-                           "usage": usage, "tensorfold": result["stats"]}
++                           "choices": [choice], "usage": usage, "tensorfold": result["stats"]}
+             self._json(200, payload)
+ 
+     return Handler
+diff --git a/src/tensorfold/families/glm5_next/cuda/batch.py b/src/tensorfold/families/glm5_next/cuda/batch.py
+index dc15b34..45a0b06 100644
+--- a/src/tensorfold/families/glm5_next/cuda/batch.py
++++ b/src/tensorfold/families/glm5_next/cuda/batch.py
+@@ -722,6 +722,7 @@ class Job:
+     stats: dict = field(default_factory=dict)
+     vision: Any = None                            # patches/0500: the prompt's image rows (``vision.Table``) or None
+     sess: Any = None                              # patches/0180: the admission's ``sessions.Plan`` (store on)
++    lp_sink: Any = None                           # patches/9001: rank 0: a list the delivered tokens' logprobs extend
+ 
+ 
+ class Always:
+@@ -1551,6 +1552,10 @@ class Batcher:
+                         bool(getattr(req, "stop_eos", True)), getattr(req, "knobs", None),
+                         bool(getattr(req, "background", False)))
+         job.vision = vis
++        lp = int(getattr(req, "logprobs", 0) or 0)            # patches/9001: rank 1 learns it from the header
++        if lp > 0:
++            job.values["logprobs"] = lp
++            job.lp_sink = getattr(req, "lp_sink", None)
+         if vis is not None and self.g.vision is not None:
+             job.stats["vision"] = dict(self.g.vision.last)
+         self._submit([job])
+@@ -1836,8 +1841,9 @@ class Batcher:
+         cache = [c for c in self.caches[slot] if len(c.ids) < len(snap.ids) and snap.ids[:len(c.ids)] == c.ids]
+         self.caches[slot] = cache[-1:] + [snap]
+ 
+-    def _emit(self, seq: Seq, tokens: list[int]) -> None:
+-        """Deliver tokens to the caller; a background request running again skips the ones it already sent."""
++    def _emit(self, seq: Seq, tokens: list[int], lps: list | None = None) -> None:
++        """Deliver tokens to the caller; a background request running again skips the ones it already sent.
++        patches/9001: ``lps`` (one entry a token) go to the job's logprob sink before the tokens are delivered."""
+ 
+         start = seq.emitted
+         seq.emitted += len(tokens)
+@@ -1845,6 +1851,9 @@ class Batcher:
+         if job.out is None or not tokens:
+             return
+         new = tokens[max(0, job.sent - start):]
++        if new and job.lp_sink is not None:     # never raises here: a gap fails only that request (server side)
++            ok = lps is not None and len(lps) == len(tokens)
++            job.lp_sink.extend(lps[max(0, job.sent - start):] if ok else [None] * len(new))
+         if new:
+             if self.overlap.emit:               # patches/0370: after the next forward's launch (``_flush``)
+                 if self._held is None:
+@@ -2008,12 +2017,14 @@ class Batcher:
+                     seq.solo += 1
+                 end = batchplan.piece_end(seq.done, n, solo, grid)
+                 e.checkpoints = seq.marks           # patches/0180: the store's marks inside this piece
++                e.lp_want, e.lp_last = int(job.values.get("logprobs", 0) or 0), None     # patches/9001
+                 try:
+                     with vision_mod.active(job.vision):     # patches/0500: the prompt's image rows (None: none)
+                         first = (mpf.take(self, slot) or prefill)(e, job.prompt[:end], job.sampling, mtp=use_mtp,
+                                                                   drafter=drafter, resume=seq.resume)   # 0560
+                 finally:
+                     e.checkpoints = ()
++                    first_lp, e.lp_want, e.lp_last = e.lp_last, 0, None                  # patches/9001
+                 saves = list(getattr(e, "mark_snaps", ()) or ()) if job.draft else []
+                 before, e.snap_before = job.draft and end == n and pfgrid.before_end(), 0     # patches/0540
+                 e.mark_snaps = []
+@@ -2065,7 +2076,7 @@ class Batcher:
+                 job.stats["fp8_prefill"] = 1
+             if tag % 64 // pfgrid.B12X:
+                 job.stats["b12x"] = tag % 64 // pfgrid.B12X
+-        self._emit(seq, [first])
++        self._emit(seq, [first], [first_lp[0]] if first_lp else None)     # patches/9001: its logprobs if asked
+         if self.emit_first and self._held:          # patches/0540: not held behind the round's other pieces
+             self._flush()
+         seq.stepper = Stepper(self, slot, job, first, last_hidden)
+@@ -2263,11 +2274,23 @@ class Batcher:
+             self._ahead = dover.rider_decode(words)
+         else:
+             sampled = sample_multi(w, logits, specs)
++        # patches/9001: the logprobs of the rows of requests that asked for them (both ranks, one exchange)
++        lp_of: dict[int, list] = {}
++        lp_rows = [(i, spec) for i, (q, spec) in enumerate(zip(seqs, specs)) if q.job.values.get("logprobs", 0)]
++        if lp_rows:
++            from .decode import logprob_rows
++
++            got = logprob_rows(w, torch.cat([logits[off:off + R] for _, (off, R, _, _) in lp_rows]),
++                               [t for i, _ in lp_rows for t in sampled[i]])
++            at = 0
++            for i, (_, R, _, _) in lp_rows:
++                lp_of[i] = got[at:at + R]
++                at += R
+         shared = len(active) > 1
+         tokens = 0
+         from . import dump as dump_mod          # patches/0430
+         dumped = [] if dump_mod.DUMP is not None else None
+-        for s, q, (off, R, _, _), rows, n, win in zip(active, seqs, specs, sampled, ran, windows):
++        for idx, (s, q, (off, R, _, _), rows, n, win) in enumerate(zip(active, seqs, specs, sampled, ran, windows)):
+             pos = self.states[s].pos
+             with self._on(s) as e:
+                 keep = q.stepper.accept(e, rows, off, shared, n) if n != R else q.stepper.accept(e, rows, off, shared)
+@@ -2275,7 +2298,9 @@ class Batcher:
+                 dumped.append((self.states[s], off, keep, win[:keep], pos))
+             tokens += keep
+             out = q.stepper.out
+-            self._emit(q, rows[:keep][:max(0, q.job.max_tokens - (len(out) - keep))])
++            bound = max(0, q.job.max_tokens - (len(out) - keep))
++            lps = lp_of.get(idx)
++            self._emit(q, rows[:keep][:bound], lps[:keep][:bound] if lps is not None else None)
+         if dumped:                              # patches/0430: the kept rows as training records (reads only)
+             dump_mod.decode_round(g.e, logits, dumped)
+         self.round_costs.record(parts, tokens)
+diff --git a/src/tensorfold/families/glm5_next/cuda/decode.py b/src/tensorfold/families/glm5_next/cuda/decode.py
+index 48a7c5a..35bed61 100644
+--- a/src/tensorfold/families/glm5_next/cuda/decode.py
++++ b/src/tensorfold/families/glm5_next/cuda/decode.py
+@@ -71,6 +71,50 @@ def sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], samp
+     return chosen
+ 
+ 
++LP_TOP = 20     # patches/9001: alternatives computed per row (OpenAI / vLLM cap top_logprobs at 20)
++
++
++def logprob_rows(w: Weights, logits: torch.Tensor, chosen: Sequence[int]) -> list[tuple[float, list[tuple[int, float]]]]:
++    """patches/9001: each row's natural-log probability of its ``chosen`` token and the LP_TOP most likely tokens,
++    from the raw logits over the WHOLE vocabulary (both ranks' halves: a log-sum-exp and a top-k per rank, one
++    all-gather). Temperature, top-k and top-p are not applied (vLLM's default ``raw_logprobs``). Reads the logits
++    only: the tokens are the sampler's. Every rank must call it for the same rows (it is a collective)."""
++
++    R = int(logits.shape[0])
++    x = logits[:R].float()
++    V = int(x.shape[1])
++    k = min(LP_TOP, V)
++    lse = torch.logsumexp(x, dim=-1, keepdim=True)
++    tv, ti = torch.topk(x, k, dim=-1)
++    ti = (ti + w.vocab_offset).to(torch.int32)
++    c = torch.tensor([int(t) for t in chosen], dtype=torch.int64, device=x.device) - w.vocab_offset
++    inside = (c >= 0) & (c < V)
++    cv = x.gather(1, c.clamp(0, V - 1)[:, None])
++    cv = torch.where(inside[:, None], cv, torch.full_like(cv, float("-inf")))
++    packed = torch.cat([lse, cv, tv, ti.view(torch.float32)], dim=1).contiguous()
++    width = 2 + 2 * k
++    if w.comm is None:
++        world = 1
++        g = packed.view(1, R, width).cpu()
++    else:
++        world = w.world
++        buf = torch.empty((world * packed.numel(),), dtype=torch.float32, device=x.device)
++        comm_mod.fast_gather(w.comm, packed.view(-1), buf)
++        g = buf.view(world, R, width).cpu()
++        comm_mod.check(w.comm)
++    lses = torch.logsumexp(g[:, :, 0].double(), dim=0)                    # [R]
++    cvs = g[:, :, 1].double().max(dim=0).values                           # [R]
++    vals = torch.cat([g[r, :, 2:2 + k] for r in range(world)], dim=1).double().numpy()
++    ids = torch.cat([g[r, :, 2 + k:].contiguous().view(torch.int32) for r in range(world)], dim=1).numpy()
++    out = []
++    for i in range(R):
++        order = np.lexsort((ids[i], -vals[i]))[:k]
++        z = float(lses[i])
++        tops = [(int(ids[i][j]), min(0.0, float(vals[i][j]) - z)) for j in order]
++        out.append((min(0.0, float(cvs[i]) - z), tops))
++    return out
++
++
+ def _sample_device(w: Weights, vals: torch.Tensor, ids: torch.Tensor, positions: Sequence[int], sampling,
+                    k: int, world: int, probs: list[float] | None) -> list[int]:
+     """patches/0450 (GLM53_TF_GPU_ROUND ``sample``): ``sample_rows``' draw on the GPU (``gpusample``: the host's bits);
+@@ -274,7 +318,10 @@ class Engine:
+ 
+     def sample(self, logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None, *,
+                draft: bool = False, probs: list[float] | None = None) -> list[int]:
+-        return sample_rows(self.w, logits, positions, sampling, None, probs, draft=draft)
++        out = sample_rows(self.w, logits, positions, sampling, None, probs, draft=draft)
++        if not draft and getattr(self, "lp_want", 0):      # patches/9001: a prefill's first token (both ranks)
++            self.lp_last = logprob_rows(self.w, logits, out)
++        return out
+ 
+     def tap_rows(self, n: int) -> torch.Tensor:
+         """The last forward's first n rows of DFlash2 taps, concatenated in layer order: [n, taps * D]."""
+diff --git a/src/tensorfold/families/glm5_next/cuda/engine.py b/src/tensorfold/families/glm5_next/cuda/engine.py
+index c941662..5260165 100644
+--- a/src/tensorfold/families/glm5_next/cuda/engine.py
++++ b/src/tensorfold/families/glm5_next/cuda/engine.py
+@@ -627,7 +627,8 @@ class GlmEngine:
+                 "mtp_window": int(pfglue.MTP_WINDOW),
+                 "hc_fused": int(glue.HC_FUSED),
+                 "attn_bm32": int(bool(latent.BF16_BM32)),
+-                "b12x": int(b12xpf.BITS)}                                # patches/0240
++                "b12x": int(b12xpf.BITS),                                # patches/0240
++                "logprobs": 0}                                           # patches/9001: per request only
+ 
+     def _set_knobs(self, values: dict[str, int]) -> None:
+         """Set the knobs whose value differs from the current one (the others are left exactly as they are)."""
+diff --git a/src/tensorfold/families/glm5_next/cuda/knobs.py b/src/tensorfold/families/glm5_next/cuda/knobs.py
+index 5f6884d..a96546f 100644
+--- a/src/tensorfold/families/glm5_next/cuda/knobs.py
++++ b/src/tensorfold/families/glm5_next/cuda/knobs.py
+@@ -92,7 +92,8 @@ PER_REQUEST = tuple(RANGES) + ("depth",)
+ # patches/0071's cost flag, calib_online as rank 0's cost table)
+ HEADER = ("expert_loop", "prefill_rows", "longctx_graphs", "profile", "auto_fdrafts", "calib_online", "fast_prefill",
+           "fp8_prefill", "prefill_overlap", "fat_experts", "moe_glue", "mtp_window", "hc_fused", "attn_bm32",
+-          "b12x")                                                        # patches/0240
++          "b12x",                                                        # patches/0240
++          "logprobs")                                                    # patches/9001: top logprobs (0: off)
+ 
+ LOAD_ONLY: dict[str, str] = {
+     "nonexpert": "GLM53_TF_NONEXPERT is the stored weight format, quantized once at load",

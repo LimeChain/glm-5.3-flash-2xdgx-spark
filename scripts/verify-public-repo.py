@@ -29,6 +29,8 @@ REQUIRED = {
     "tensorfold/config/prod-c8.env.example",
     "tensorfold/scripts/tf-prod.sh",
     "tensorfold/grafana/tf_vllm_adapter.py",
+    "tensorfold/patches/9001-glm-logprobs.patch",
+    "tensorfold/patches/Dockerfile.logprobs",
 }
 missing = sorted(path for path in REQUIRED if not (ROOT / path).is_file())
 assert not missing, f"missing required files: {missing}"
