@@ -1,0 +1,381 @@
+diff --git a/cuda/http.py b/cuda/http.py
+index bebd06f..6939a54 100644
+--- a/cuda/http.py
++++ b/cuda/http.py
+@@ -128,9 +128,13 @@ def make_handler(app: App):
+             cancelled = lambda: gone.cancelled                  # noqa: E731
+ 
+             def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
++                delta = dict(delta)
++                lp = delta.pop("_logprobs", None)          # LimeChain 9001: this chunk's answer-token logprobs
+                 if chat:
+-                    return {"id": rid, "object": kind, "created": created, "model": model,
+-                            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
++                    choice = {"index": 0, "delta": delta, "finish_reason": finish}
++                    if lp is not None:
++                        choice["logprobs"] = {"content": lp}
++                    return {"id": rid, "object": kind, "created": created, "model": model, "choices": [choice]}
+                 return {"id": rid, "object": kind, "created": created, "model": model,
+                         "choices": [{"index": 0, "text": delta.get("content", ""), "finish_reason": finish}]}
+ 
+diff --git a/cuda/server.py b/cuda/server.py
+index 762cd3d..29dabd8 100644
+--- a/cuda/server.py
++++ b/cuda/server.py
+@@ -201,9 +201,9 @@ class App:
+         spec = grammar.request_spec(body)
+         top = probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
+         if top is not None:
+-            if not chat or body.get("stream") or thinking or tools or stop or spec is not None or budget:
+-                raise RequestError("logprobs support nonstreamed text chat with thinking off, without tools, "
+-                                   "stop strings or structured output")
++            # LimeChain 9001: streamed, thinking (answer tokens only), tools and stop strings too; not under a grammar
++            if spec is not None or budget:
++                raise RequestError("logprobs are not supported with structured output or a thinking budget")
+             if not hasattr(self, "_probability_decoder"):
+                 self._probability_decoder = TokenBytes(self.tok)
+         compiled = (spec, self._grammars().compile(spec)) if spec is not None else None
+@@ -426,6 +426,8 @@ class App:
+                 if len(answer) > sent["content"]:
+                     delta["content"] = answer[sent["content"]:]
+                     sent["content"] = len(answer)
++                if probabilities is not None and "content" in delta:     # LimeChain 9001: this chunk's tokens
++                    delta["_logprobs"] = lp_answer(len(out))
+                 parts = [delta] if delta else []
+                 if calls_stream is not None:
+                     parts += calls_stream.feed(call_text(raw))
+@@ -450,6 +452,29 @@ class App:
+                 return True
+             return stopped["client"] or stopped["stop"]
+ 
++        # LimeChain 9001: the answer's tokens (after </think> when thinking; never end tokens), sent once each
++        lp_think = self.tok.token_to_id("</think>") if chat and thinking else None
++        lp_sent = [0]
++
++        def lp_from() -> int | None:
++            if lp_think is None:
++                return 0
++            return out.index(lp_think) + 1 if lp_think in out else None
++
++        def lp_answer(upto: int) -> list[dict[str, Any]]:
++            start = lp_from()
++            if start is None:
++                return []
++            lo, hi = max(lp_sent[0], start), min(upto, len(out))
++            if hi <= lo:
++                return []
++            rows = [probabilities.rows.get(len(prompt) + i) for i in range(lo, hi)]
++            lp_sent[0] = hi
++            if any(r is None for r in rows):
++                raise RuntimeError("logprobs: a reply token has no log probability row")
++            rows = [{**r, "top": r["top"][:probabilities.top]} for r in rows]
++            return self._probability_decoder.format(rows, ends)["content"]
++
+         draft = body.get("draft", True) is not False
+         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
+ 
+@@ -460,6 +485,8 @@ class App:
+ 
+             probabilities = Probabilities(body.get("top_logprobs") or 0, len(prompt), max_tokens)
+             options["probabilities"] = probabilities
++            if not hasattr(self, "_probability_decoder"):
++                self._probability_decoder = TokenBytes(self.tok)
+         if takes_stop_eos:
+             options["stop_eos"] = not prepared.ignore_eos
+         shaped = prepared.grammar is not None or prepared.think_budget > 0
+@@ -549,8 +576,19 @@ class App:
+                                                          else "length")
+         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
+             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
+-        logprobs = (self._probability_decoder.format(probabilities.emitted(out), ends)
+-                    if probabilities is not None else None)
++        logprobs = None
++        if probabilities is not None:                 # LimeChain 9001: answer tokens only, top_logprobs cut to the ask
++            start = lp_from()
++            rows = [probabilities.rows.get(len(prompt) + i) for i in range(start or 0, len(out))] if start is not None \
++                else []
++            if any(r is None for r in rows):
++                raise RuntimeError("logprobs: a reply token has no log probability row")
++            top_n = probabilities.top
++            rows = [{**r, "top": r["top"][:top_n]} for r in rows]
++            logprobs = self._probability_decoder.format(rows, ends)
++            tail = lp_answer(len(out))            # streamed: the tokens no content delta carried yet
++            if tail:
++                final["_logprobs"] = tail
+         # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
+         if xml_stream is not None and xml_stream.streamed:
+             streamed = xml_stream.index + 1
+diff --git a/cuda/streams.py b/cuda/streams.py
+index 07492c8..e6797df 100644
+--- a/cuda/streams.py
++++ b/cuda/streams.py
+@@ -30,6 +30,7 @@ class Stream:
+     constraint: Any = None                                # the reply's grammar (tensorfold.engine.grammar), or None
+     background: bool = False                              # priority "background": after, and yielding to, the rest
+     probabilities: Any = None
++    lp: bool = False                                      # LimeChain 9001: log probabilities wanted (both ranks)
+     carry: dict | None = None                             # the stats of the stream this one continues
+     owed: list[int] = field(default_factory=list)         # a replay's tokens sent before it gave way: checked, not resent
+     error: Exception | None = None                        # why a stream ended without finishing
+diff --git a/families/glm5_next/cuda/engine.py b/families/glm5_next/cuda/engine.py
+index e56ba5b..c1ca64e 100644
+--- a/families/glm5_next/cuda/engine.py
++++ b/families/glm5_next/cuda/engine.py
+@@ -1042,8 +1042,12 @@ class GlmEngine:
+             stats["stages_ms"] = {k: round(v * 1e3, 1) for k, v in res.stages.items()}
+         return stats
+ 
++    @property
++    def supports_logprobs(self) -> bool:        # LimeChain 9001: the multi-stream engine (--parallel > 1)
++        return self.scheduler is not None
++
+     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
+-                 constraint=None, *, vision=None, background: bool = False) -> dict[str, Any]:
++                 constraint=None, *, vision=None, background: bool = False, probabilities=None) -> dict[str, Any]:
+         """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal; ``vision``: an image prompt's prepared pictures (``GlmPrepared``); ``background``: under --parallel, after the other requests and yielding to them."""
+ 
+         if len(prompt) >= self.limit:
+@@ -1060,9 +1064,12 @@ class GlmEngine:
+                 raise ValueError("image inputs require starting this server with --vision")
+             stats = self.scheduler.submit(list(prompt), max_tokens, sampling, bool(draft) and not self.serial_only,
+                                           on_tokens, stop_eos=stop_eos, vision=vision, constraint=constraint,
+-                                          background=background, glm={"code": code, "spec": spec})
++                                          background=background, glm={"code": code, "spec": spec},
++                                          probabilities=probabilities)
+             stats.update(policy=spec, drafts=draft)
+             return stats
++        if probabilities is not None:
++            raise ValueError("logprobs need --parallel above 1 on this engine (LimeChain 9001)")
+         positions: list[int] = []
+         feed = None
+         if vision is not None:               # encoded here, before rank 1 is told anything, so a failure stops both
+diff --git a/families/glm5_next/cuda/lc_logprobs.py b/families/glm5_next/cuda/lc_logprobs.py
+new file mode 100644
+index 0000000..2f008ad
+--- /dev/null
++++ b/families/glm5_next/cuda/lc_logprobs.py
+@@ -0,0 +1,69 @@
++"""LimeChain patch 9001 for the multi-stream engine: raw log probabilities of accepted tokens on two ranks.
++
++Each rank holds half of the vocabulary's logits. ``rows`` reduces every row on each rank to its log-sum-exp, the
++chosen token's logit (when it is in this rank's half) and its top ``TOP`` logits, gathers that across the ranks in
++one exchange, and combines them exactly (log-sum-exp of the ranks' log-sum-exps). Temperature, top-k and top-p are
++not applied, as vLLM's default ``raw_logprobs``. It only reads logits; the sampled tokens are the sampler's.
++
++It is a collective: both ranks call it for the same rows in the same order (rank 1 learns which streams want
++log probabilities from the ADMIT message).
++"""
++
++from __future__ import annotations
++
++from typing import Sequence
++
++import numpy as np
++import torch
++
++TOP = 20
++
++
++@torch.no_grad()
++def rows(w, logits: torch.Tensor, chosen: Sequence[int]) -> list[tuple[float, list[tuple[int, float]]]]:
++    """[(logprob of chosen, [(token, logprob) x TOP, best first])] for each row of ``logits`` ([R, V/world])."""
++
++    R = int(logits.shape[0])
++    if R == 0:
++        return []
++    x = logits.float()
++    V = int(x.shape[1])
++    k = min(TOP, V)
++    lse = torch.logsumexp(x, dim=-1, keepdim=True)
++    tv, ti = torch.topk(x, k, dim=-1)
++    ti = (ti + w.vocab_offset).to(torch.int32)
++    c = torch.tensor([int(t) for t in chosen], dtype=torch.int64, device=x.device) - w.vocab_offset
++    inside = (c >= 0) & (c < V)
++    cv = x.gather(1, c.clamp(0, V - 1)[:, None])
++    cv = torch.where(inside[:, None], cv, torch.full_like(cv, float("-inf")))
++    packed = torch.cat([lse, cv, tv, ti.view(torch.float32)], dim=1).contiguous()
++    width = 2 + 2 * k
++    if w.comm is None:
++        world = 1
++        g = packed.view(1, R, width).cpu()
++    else:
++        world = w.world
++        buf = torch.empty((world * packed.numel(),), dtype=torch.float32, device=x.device)
++        w.comm.all_gather(packed.view(-1), buf)
++        g = buf.view(world, R, width).cpu()
++    lses = torch.logsumexp(g[:, :, 0].double(), dim=0)
++    cvs = g[:, :, 1].double().max(dim=0).values
++    vals = torch.cat([g[r, :, 2:2 + k] for r in range(world)], dim=1).double().numpy()
++    ids = torch.cat([g[r, :, 2 + k:].contiguous().view(torch.int32) for r in range(world)], dim=1).numpy()
++    out = []
++    for i in range(R):
++        order = np.lexsort((ids[i], -vals[i]))[:k]
++        z = float(lses[i])
++        tops = [(int(ids[i][j]), min(0.0, float(vals[i][j]) - z)) for j in order]
++        out.append((min(0.0, float(cvs[i]) - z), tops))
++    return out
++
++
++def record(probabilities, prompt_len: int, start: int, tokens: Sequence[int], got) -> None:
++    """Rank 0: rows ``got`` for the reply's tokens ``tokens``, which begin at reply index ``start``, into the
++    request's ``tensorfold.engine.probabilities.Probabilities`` (positions are absolute: prompt + reply index)."""
++
++    if probabilities is None or not tokens:
++        return
++    for i, (t, g) in enumerate(zip(tokens, got)):
++        probabilities.rows[prompt_len + start + i] = {"id": int(t), "logprob": g[0], "top": list(g[1])}
+diff --git a/families/glm5_next/cuda/multi.py b/families/glm5_next/cuda/multi.py
+index 8bd94c0..e70082b 100644
+--- a/families/glm5_next/cuda/multi.py
++++ b/families/glm5_next/cuda/multi.py
+@@ -612,7 +612,8 @@ class MultiDecoder:
+             shared = shared_points(prompt, cut, grid_point(len(prompt), cut, self.grid), self.grid, g.shared, known,
+                                    g.opener)
+         sid = self.next_sid
+-        payload = [sid, slot, base, need, hit.kid if hit is not None else -1, copy, s.count, int(s.stop_eos),
++        payload = [sid, slot, base, need, hit.kid if hit is not None else -1, copy, s.count,
++                   int(s.stop_eos) | (2 if getattr(s, "lp", False) else 0),            # LimeChain 9001
+                    int(draft), *pack_sampling(s.sampling), *(shared + [0] * SHARED_SLOTS)[:SHARED_SLOTS], *code,
+                    len(prompt), *prompt]
+         from tensorfold.engine.grammar import pack
+@@ -642,7 +643,8 @@ class MultiDecoder:
+         i += 1 + n
+         n = p[i]
+         positions = p[i + 1:i + 1 + n]
+-        return dict(sid=sid, slot=slot, base=base, size=size, kid=kid, copy=copy, count=count, stop_eos=bool(stop_eos),
++        return dict(sid=sid, slot=slot, base=base, size=size, kid=kid, copy=copy, count=count,
++                    stop_eos=bool(stop_eos & 1), lp=bool(stop_eos & 2),                  # LimeChain 9001
+                     draft=bool(draft), sampling=sampling, shared=shared, code=code, prompt=prompt, packed=packed,
+                     positions=positions)
+ 
+@@ -1077,6 +1079,9 @@ class MultiDecoder:
+             if lane.constraint is not None:             # the first token's row, under the reply's grammar
+                 lane.constraint.mask(logits, lane.constraint.window([0], [-1]), self.w.vocab_offset)
+             first = sample_streams(self.w, [(logits, [n], s.sampling)])[0][0]
++            if s.lp:                                    # LimeChain 9001: both ranks, one exchange
++                from . import lc_logprobs
++                lc_logprobs.record(s.probabilities, n, len(s.out), [first], lc_logprobs.rows(self.w, logits, [first]))
+             if lane.constraint is not None:
+                 lane.constraint.advance([first])
+         finally:
+@@ -1136,7 +1141,16 @@ class MultiDecoder:
+             who.append(k)
+         firsts: list[int | None] = [None] * len(group)
+         if parts:
+-            for k, rows in zip(who, sample_streams(self.w, parts)):
++            got_first = sample_streams(self.w, parts)
++            lpk = [(i, k) for i, k in enumerate(who) if group[k][0].s.lp]          # LimeChain 9001
++            if lpk:
++                from . import lc_logprobs
++                got = lc_logprobs.rows(self.w, torch.cat([parts[i][0] for i, _ in lpk]),
++                                       [got_first[i][0] for i, _ in lpk])
++                for (i, k), g in zip(lpk, got):
++                    s_ = group[k][0].s
++                    lc_logprobs.record(s_.probabilities, len(s_.prompt), len(s_.out), [got_first[i][0]], [g])
++            for k, rows in zip(who, got_first):
+                 lane = group[k][0]
+                 firsts[k] = rows[0]
+                 if lane.constraint is not None:
+@@ -1218,6 +1232,16 @@ class MultiDecoder:
+                     break
+                 keep += 1
+             keeps.append(keep)
++        lp_rows: dict[int, list] = {}
++        lpk = [k for k, l in enumerate(lanes) if l.s.lp]                            # LimeChain 9001
++        if lpk:
++            from . import lc_logprobs
++            got = lc_logprobs.rows(self.w, torch.cat([v.logits[k][:keeps[k]] for k in lpk]),
++                                   [t for k in lpk for t in sampled[k][:keeps[k]]])
++            at = 0
++            for k in lpk:
++                lp_rows[k] = got[at:at + keeps[k]]
++                at += keeps[k]
+         if prof is not None:
+             prof.mark("accept")
+         verify.commit(segments, keeps)
+@@ -1229,7 +1253,7 @@ class MultiDecoder:
+                 self.drafts.commit(items)
+         if prof is not None:
+             prof.mark("taps")
+-        for l, seg, rows, keep, was_copy in zip(lanes, segments, sampled, keeps, copied):
++        for k_lp, (l, seg, rows, keep, was_copy) in enumerate(zip(lanes, segments, sampled, keeps, copied)):
+             s = l.s
+             new = rows[:keep]
+             if l.constraint is not None:
+@@ -1243,6 +1267,10 @@ class MultiDecoder:
+                 l.copy_drafted += ndrafts
+                 l.copy_accepted += keep - 1
+             room = s.count - len(s.out)
++            if k_lp in lp_rows:                     # LimeChain 9001: before the tokens reach the server
++                from . import lc_logprobs
++                keep_n = len(new[:max(0, room)])
++                lc_logprobs.record(s.probabilities, len(s.prompt), len(s.out), new[:keep_n], lp_rows[k_lp][:keep_n])
+             s.take(new[:max(0, room)], self._ends(l))
+             if l.policy is not None:
+                 l.depth = min(l.policy.next(*((0, 0) if was_copy else (ndrafts, keep - 1))),
+@@ -1368,6 +1396,7 @@ class MultiDecoder:
+                 a = self._parse_admit(p)
+                 s = Stream(list(a["prompt"]), a["count"], a["sampling"], draft=a["draft"], stop_eos=a["stop_eos"],
+                            sid=a["sid"])
++                s.lp = a.get("lp", False)                                                  # LimeChain 9001
+                 constraint = None
+                 if a["packed"]:
+                     from tensorfold.engine import grammar
+@@ -1442,10 +1471,13 @@ class GlmScheduler(Scheduler):
+ 
+     def submit(self, prompt: list[int], count: int, sampling: Any, draft: bool,
+                emit: Callable[[list[int]], bool | None], stop_eos: bool = True, *, vision: Any = None,
+-               constraint: Any = None, background: bool = False, glm: dict | None = None) -> dict:
++               constraint: Any = None, background: bool = False, glm: dict | None = None,
++               probabilities: Any = None) -> dict:
+         box: queue.Queue = queue.Queue()
+         stream = Stream(list(prompt), max(1, count), sampling, draft=draft, stop_eos=stop_eos, vision=vision,
+                         constraint=constraint, background=background)
++        if probabilities is not None:           # LimeChain 9001
++            stream.probabilities, stream.lp = probabilities, True
+         stream.glm = dict(glm or {})
+         cancel = [False]
+         stream.emit = lambda new: (box.put(("tokens", new)), cancel[0])[1]
+diff --git a/families/glm5_next/cuda/weights.py b/families/glm5_next/cuda/weights.py
+index 783bd39..5c86d1d 100644
+--- a/families/glm5_next/cuda/weights.py
++++ b/families/glm5_next/cuda/weights.py
+@@ -70,6 +70,7 @@ class Config:
+         quant = raw.get("quantization") or raw.get("quantization_config") or {}
+         eos = t.get("eos_token_id", raw.get("eos_token_id"))
+         eos = tuple(int(e) for e in eos) if isinstance(eos, list) else (int(eos),)
++        eos = extra_stop(eos, model_dir)        # LimeChain 9002: <|assistant|> ends a reply too
+         n = int(t["num_hidden_layers"])
+         kinds = ["kda" if k == "linear_attention" else "dsa" for k in t["layer_types"]]
+         dense = int(t.get("first_k_dense_replace", 3))
+@@ -454,3 +455,30 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool =
+         rd.close()
+     torch.cuda.empty_cache()
+     return w
++
++
++def extra_stop(eos, model_dir):
++    """LimeChain patch 9002: stop tokens beyond config.json's eos_token_id. GLM-5.3 lists <|endoftext|>, <|user|> and
++    <|observation|>, but ends short exact-format replies with <|assistant|> and then writes a fake next turn.
++    TF_GLM_EXTRA_STOP (comma-separated special-token strings, default "<|assistant|>"; empty = off) adds them by
++    token id, plus generation_config.json's eos_token_id. Read on both ranks from the same files."""
++
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++
++    d = _Path(model_dir)
++    ids = list(eos)
++    try:
++        gen = _json.loads((d / "generation_config.json").read_text()).get("eos_token_id")
++        ids += [int(x) for x in (gen if isinstance(gen, list) else [gen] if gen is not None else [])]
++    except (OSError, ValueError):
++        pass
++    names = [x.strip() for x in _os.environ.get("TF_GLM_EXTRA_STOP", "<|assistant|>").split(",") if x.strip()]
++    if names:
++        table = {a["content"]: int(a["id"]) for a in _json.loads((d / "tokenizer.json").read_text()).get("added_tokens", [])}
++        for n in names:
++            if n not in table:
++                raise ValueError(f"TF_GLM_EXTRA_STOP: {n!r} is not a special token of this tokenizer")
++            ids.append(table[n])
++    return tuple(dict.fromkeys(ids))

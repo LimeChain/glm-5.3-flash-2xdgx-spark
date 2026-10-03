@@ -1,0 +1,16 @@
+# scripts/local.sh for MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold, LimeChain production profile (2026-10-03).
+# Copy into the Mia checkout as scripts/local.sh and fill in WORKER / FABRIC_PEER. Everything else as shipped.
+WORKER=<user>@<worker CX7 address>
+FABRIC_PEER=<worker CX7 address>
+# the checkpoint and drafter this profile was measured with (Mia's default MODEL_ID is a byte-identical mirror)
+MODEL_ID=brandonmusic/GLM-5.3-Flash-tr3-4bpw
+MODEL_REVISION=5ab363a8dcf6405955fd5f99671e01a1c9fb124b
+DFLASH2_REVISION=7d74cdd881ed7e32c31175984a67823127b66cfe
+# 8 concurrent streams on the image built from mia-tensorfold/Dockerfile (Mia's engine allows 4)
+PARALLEL=8
+IMAGE=glm53-lc:prod
+# the API on loopback only (no auth); put an authenticating proxy in front before exposing it
+HOST=127.0.0.1
+PORT=8000
+# text only: the vision tower's ~1.8 GiB on rank 0 goes to the cache instead
+VISION=0

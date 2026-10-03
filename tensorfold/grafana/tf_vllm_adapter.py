@@ -95,11 +95,57 @@ def scrape_up():
         return resp.read().decode('utf-8', 'replace')
 
 
+# Mia's TensorFold recipe (TensorFold 0.6.x) exposes ``tensorfold:*`` / ``tensorfold_health:*`` with its own
+# histograms: renamed to the vLLM series the dashboards read (and the draft counters to vLLM's spec-decode ones)
+MIA_MAP = {
+    'tensorfold:requests_running': 'vllm:num_requests_running',
+    'tensorfold:requests_waiting': 'vllm:num_requests_waiting',
+    'tensorfold:prompt_tokens_total': 'vllm:prompt_tokens_total',
+    'tensorfold:generation_tokens_total': 'vllm:generation_tokens_total',
+    'tensorfold:mtp_drafted_total': 'vllm:spec_decode_num_draft_tokens_total',
+    'tensorfold:mtp_accepted_total': 'vllm:spec_decode_num_accepted_tokens_total',
+    'tensorfold:request_latency_seconds': 'vllm:e2e_request_latency_seconds',
+    'tensorfold:time_to_first_token_seconds': 'vllm:time_to_first_token_seconds',
+}
+MODEL = os.environ.get('TF_MODEL', 'GLM-5.3-Flash-EXL3')
+
+
+def render_mia(t):
+    lab = f'engine="0",model_name="{MODEL}"'
+    o, vals = [], {}
+    for line in t.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        m = re.match(r'^([a-z_:]+?)(_bucket|_sum|_count)?(\{[^}]*\})? ([0-9.eE+-]+|[+-]?Inf|NaN)$', line)
+        if not m:
+            continue
+        base, suf, labels, val = m.group(1), m.group(2) or '', m.group(3) or '', m.group(4)
+        vals[base + suf + labels] = val
+        if base not in MIA_MAP:
+            continue
+        extra = labels[1:-1] if labels else ''
+        o.append(f'{MIA_MAP[base]}{suf}{{{lab}{"," + extra if extra else ""}}} {val}')
+    def g(name, typ, val, extra=''):
+        o.append(f'# TYPE {name} {typ}')
+        o.append(f'{name}{{{lab}{extra}}} {val}')
+    g('vllm:kv_cache_usage_perc', 'gauge', vals.get('tensorfold:kv_cache_usage_ratio{pool="0"}', 0))
+    g('vllm:prefix_cache_queries_total', 'counter', vals.get('tensorfold:prompt_tokens_total', 0))
+    g('vllm:prefix_cache_hits_total', 'counter', vals.get('tensorfold_health:cached_tokens_total', 0))
+    o.append('# TYPE vllm:request_success_total counter')
+    o.append(f'vllm:request_success_total{{{lab},finished_reason="stop"}} {vals.get("tensorfold_health:requests_total", 0)}')
+    o.append(f'vllm:request_success_total{{{lab},finished_reason="error"}} 0')
+    o.append('# TYPE tf_adapter_info gauge')
+    o.append(f'tf_adapter_info{{{lab},backend="tensorfold-mia",source="tf_vllm_adapter"}} 1')
+    return '\n'.join(o) + '\n'
+
+
 def render():
     try:
         t = scrape_up()
     except Exception:
         return '# upstream unreachable\n'
+    if 'vllm:' not in t and 'tensorfold:' in t:
+        return render_mia(t)
     if 'vllm:' in t or 'tensorfold_' not in t:
         return '# upstream is not TensorFold (or already vLLM): adapter silent\n'
     v = {}

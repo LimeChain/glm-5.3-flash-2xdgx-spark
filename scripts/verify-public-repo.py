@@ -31,6 +31,9 @@ REQUIRED = {
     "tensorfold/grafana/tf_vllm_adapter.py",
     "tensorfold/patches/9001-glm-logprobs.patch",
     "tensorfold/patches/Dockerfile.logprobs",
+    "mia-tensorfold/Dockerfile",
+    "mia-tensorfold/lc-9001-9002.patch",
+    "mia-tensorfold/scripts/glm-prod.sh",
 }
 missing = sorted(path for path in REQUIRED if not (ROOT / path).is_file())
 assert not missing, f"missing required files: {missing}"
@@ -105,8 +108,9 @@ for expected in (
 
 top = (ROOT / "README.md").read_text()
 for expected in (
-    "Path A — TensorFold",
-    "Path B — vLLM + NVFP4",
+    "Path A — Mia's TensorFold recipe",
+    "Path B — jayleaton's kit",
+    "Path C — vLLM + NVFP4",
     "GLM53_TF_BATCH_ADMIT_GB",
     "docs/vllm-path.md",
     "each ran **once**",

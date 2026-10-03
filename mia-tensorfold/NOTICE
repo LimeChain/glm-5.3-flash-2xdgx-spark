@@ -1,0 +1,13 @@
+LimeChain changes to MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold (Apache-2.0, Copyright 2026 MiaAI-Lab)
+and TensorFold 0.6.0 (https://github.com/ashhart/TensorFold, Apache-2.0 from 0.6.0; code before 0.6.0 under its
+MIT notice, Copyright 2026 TensorFold contributors), as Apache-2.0 section 4 asks:
+
+- Dockerfile: starts from Mia's published image (pinned by digest) and changes, in TensorFold's installed package,
+  families/glm5_next/cuda/engine.py (PARALLEL_MOST 4 -> 8, MULTI_WINDOW 32 -> 64), segments.py (MAX_SEGS 4 -> 8) and
+  multi.py (MAX_WINDOW 32 -> 64).
+- lc-9001-9002.patch: cuda/server.py, cuda/http.py, cuda/streams.py, families/glm5_next/cuda/{engine,multi,weights}.py
+  and the new families/glm5_next/cuda/lc_logprobs.py: OpenAI logprobs on the multi-stream engine (9001) and
+  <|assistant|> as an end token (9002).
+- start.sh's PARALLEL check widened from 1-4 to 1-8 (README, path A step 3).
+
+Keep Mia's and TensorFold's NOTICE files with any copy of a patched tree. Changes Copyright 2026 LimeChain, Apache-2.0.
