@@ -16,3 +16,6 @@ results/2026-09-22/*
 !results/2026-09-30-bakeoff/
 results/2026-09-30-bakeoff/*
 !results/2026-09-30-bakeoff/*.json
+!results/2026-10-03-bakeoff/
+results/2026-10-03-bakeoff/*
+!results/2026-10-03-bakeoff/*.json

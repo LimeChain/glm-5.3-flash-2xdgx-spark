@@ -1,0 +1,37 @@
+{
+ "prompt_chars": 321653,
+ "nonstream": {
+  "prompt_tokens": 111529,
+  "finish": "stop",
+  "reasoning_chars": 817,
+  "content": "1434",
+  "n_logprobs": 2,
+  "tokens_rebuild_content": true,
+  "valid": true,
+  "seconds": 71
+ },
+ "stream": {
+  "finish": "stop",
+  "error": null,
+  "reasoning_chars": 805,
+  "content": "1434",
+  "n_logprobs": 2,
+  "tokens_rebuild_content": true,
+  "valid": true,
+  "content_chunks_with_logprobs": "2/2",
+  "seconds": 71
+ },
+ "concurrent_small": [
+  "stop",
+  "stop",
+  "stop",
+  "length",
+  "length",
+  "length"
+ ],
+ "health_after": {
+  "ok": true,
+  "errors": null,
+  "fatal": null
+ }
+}
